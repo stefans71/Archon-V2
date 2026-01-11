@@ -1,0 +1,12 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: archon-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

@@ -1,0 +1,113 @@
+# Claude Code CLI Service for Archon Stack
+#
+# This file defines a claude-code-cli service that integrates with
+# the existing Archon docker-compose stack.
+#
+# USAGE:
+#
+# Option 1: Add to existing docker-compose.yml
+#   Copy the 'claude-code-cli' service definition into your main docker-compose.yml
+#
+# Option 2: Use as override file
+#   docker compose -f docker-compose.yml -f docker-compose.claude-code.yml up -d claude-code-cli
+#
+# Option 3: Run standalone (after building)
+#   docker compose -f docker-compose.claude-code.yml run --rm claude-code-cli
+#
+# AUTHENTICATION:
+#
+# API Key Mode (recommended for automation):
+#   Add to .env: ANTHROPIC_API_KEY=sk-ant-...
+#   Or pass directly: docker compose run -e ANTHROPIC_API_KEY=sk-ant-... claude-code-cli
+#
+# OAuth Mode (interactive):
+#   docker compose run -it claude-code-cli
+#   Follow the authentication prompts in your browser
+#
+# EXAMPLES:
+#
+# Interactive session with workspace:
+#   docker compose run -it -v $(pwd):/workspace claude-code-cli
+#
+# Run a single command:
+#   docker compose run --rm claude-code-cli -p "List all files in /workspace"
+#
+# Chat mode with specific model:
+#   docker compose run -it claude-code-cli --model claude-sonnet-4-20250514
+
+services:
+  claude-code-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.claude-code
+    container_name: claude-code-cli
+
+    # Interactive mode - required for OAuth and chat
+    stdin_open: true  # docker run -i
+    tty: true         # docker run -t
+
+    environment:
+      # API key authentication (optional - set in .env or pass at runtime)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # MCP configuration is pre-baked in Dockerfile
+      # These are informational - the actual config is in /root/.claude/mcp_servers.json
+      - MCP_SERVER_URL=http://archon-mcp:8051/mcp
+
+      # Optional: Set default model
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+
+      # Optional: Disable telemetry if desired
+      # - CLAUDE_CODE_DISABLE_TELEMETRY=1
+
+    # Mount workspace for project files
+    volumes:
+      # Primary workspace mount - override with -v at runtime
+      - ${WORKSPACE_PATH:-./workspace}:/workspace
+
+      # Persist Claude authentication and settings between runs
+      - claude-code-config:/root/.claude
+
+      # Optional: Mount SSH keys for git operations
+      # - ~/.ssh:/root/.ssh:ro
+
+      # Optional: Mount git config
+      # - ~/.gitconfig:/root/.gitconfig:ro
+
+    # Join both networks to reach archon-mcp
+    networks:
+      - app-network
+      - supabase_default
+
+    # Dependencies - ensure MCP server is running
+    depends_on:
+      archon-mcp:
+        condition: service_healthy
+
+    # Working directory inside container
+    working_dir: /workspace
+
+    # No restart policy - this is an interactive tool
+    restart: "no"
+
+    # Resource limits (adjust as needed)
+    # Claude Code CLI is lightweight, but leave room for node
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+# Persistent volume for Claude config (OAuth tokens, settings)
+volumes:
+  claude-code-config:
+    name: archon-claude-code-config
+
+# Reference existing networks from main docker-compose
+networks:
+  app-network:
+    external: true
+    name: archon_app-network
+  supabase_default:
+    external: true

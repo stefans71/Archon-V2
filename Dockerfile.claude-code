@@ -1,0 +1,97 @@
+# Claude Code CLI Docker Container
+# Provides Claude Code CLI with pre-configured MCP connection to Archon
+#
+# Supports two authentication modes:
+# 1. API Key: Set ANTHROPIC_API_KEY environment variable
+# 2. OAuth: Run interactively and follow prompts (requires TTY)
+
+FROM node:20-slim
+
+# Install dependencies for Claude Code and general CLI usage
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    jq \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create workspace directory for mounting project files
+RUN mkdir -p /workspace
+
+# Create Claude config directory
+RUN mkdir -p /root/.claude
+
+# Pre-configure MCP settings for Archon connection
+# This creates the MCP server configuration pointing to archon-mcp:8051
+RUN mkdir -p /root/.claude && \
+    echo '{\n\
+  "mcpServers": {\n\
+    "archon": {\n\
+      "type": "sse",\n\
+      "url": "http://archon-mcp:8051/mcp",\n\
+      "description": "Archon MCP Server - Task management, RAG search, and project tools"\n\
+    }\n\
+  }\n\
+}' > /root/.claude/mcp_servers.json
+
+# Create entrypoint script that handles both API key and OAuth modes
+RUN echo '#!/bin/bash\n\
+set -e\n\
+\n\
+echo "========================================"\n\
+echo "  Claude Code CLI - Archon Integration"\n\
+echo "========================================"\n\
+echo ""\n\
+\n\
+# Check authentication mode\n\
+if [ -n "$ANTHROPIC_API_KEY" ]; then\n\
+    echo "[Auth] Using API key authentication"\n\
+else\n\
+    echo "[Auth] No API key found - OAuth will be used"\n\
+    echo "[Auth] You will be prompted to authenticate on first run"\n\
+fi\n\
+\n\
+# Verify MCP connectivity\n\
+echo "[MCP] Testing connection to archon-mcp:8051..."\n\
+if curl -s --max-time 5 http://archon-mcp:8051/health > /dev/null 2>&1; then\n\
+    echo "[MCP] Archon MCP server is reachable"\n\
+else\n\
+    echo "[MCP] Warning: Cannot reach archon-mcp:8051 - MCP tools may not work"\n\
+fi\n\
+echo ""\n\
+\n\
+# Change to workspace if it exists and has content\n\
+if [ -d "/workspace" ] && [ "$(ls -A /workspace 2>/dev/null)" ]; then\n\
+    cd /workspace\n\
+    echo "[Workspace] Changed to /workspace"\n\
+    echo "[Workspace] Contents: $(ls -1 | head -5 | tr '\''\\n'\'' '\'' '\'')" \n\
+    [ $(ls -1 | wc -l) -gt 5 ] && echo "... and more"\n\
+else\n\
+    echo "[Workspace] /workspace is empty or not mounted"\n\
+fi\n\
+echo ""\n\
+\n\
+# If no arguments, start interactive shell with claude\n\
+if [ $# -eq 0 ]; then\n\
+    echo "Starting Claude Code CLI..."\n\
+    echo "Type '\''exit'\'' or Ctrl+C to quit"\n\
+    echo "----------------------------------------"\n\
+    exec claude\n\
+else\n\
+    # Run claude with provided arguments\n\
+    exec claude "$@"\n\
+fi\n\
+' > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+# Set working directory
+WORKDIR /workspace
+
+# Environment variables (can be overridden at runtime)
+ENV NODE_ENV=production
+# ANTHROPIC_API_KEY should be passed at runtime if using API key auth
+
+# Use our entrypoint script
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
