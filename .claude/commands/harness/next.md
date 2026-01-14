@@ -1,41 +1,77 @@
 # Harness Next Task
 
-Get the next todo task and start working on it.
+Get the next task and start working on it.
+
+## Project Context
+
+**Project:** Archon V2 Development
+**Project ID:** `b903113d-2a15-4225-888d-c4ff2a8d4389`
+**Current Phase:** Phase 1 - Stability
 
 ## Instructions
 
-1. First check for any task in "doing" status (incomplete from previous session):
+1. **Read context first** (if this is a fresh session):
 ```
-   find_tasks(project_id="<project_id>", status="doing")
+Read docs/LEAD_ENGINEER.md
 ```
-   If found, continue that task.
+This provides your role, workflow, and key files.
 
-2. If no "doing" task, get next "todo" task:
+2. **Get next task using MCP tool:**
 ```
-   find_tasks(project_id="<project_id>", status="todo", limit=1)
+harness_next_task(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", mark_as_doing=True)
 ```
+This automatically:
+- Checks for any "doing" task (resume incomplete work)
+- If none, gets highest priority "todo" task
+- Marks it as "doing"
+- Returns task details
 
-3. If a task is found:
-   - Mark it as "doing": `manage_task(action="update", task_id="<id>", status="doing")`
-   - Read the task description and acceptance criteria
+3. **If task found:**
+   - Display task title and description
+   - Review acceptance criteria
    - Announce: "Starting task: <title>"
+   - Create a todo list for implementation steps
    - Begin implementation
 
-4. If no tasks found:
-   - Check for "review" tasks that need attention
+4. **If no tasks found:**
+   - Check response for "review" tasks count
+   - If review tasks exist, inform user
    - If none, announce: "All tasks complete!"
 
 ## Usage
 
 User: "/harness-next" or "get next task"
-Provide: project_id if not obvious from context
+
+No parameters needed - project_id is hardcoded for Archon V2.
 
 ## Workflow
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Check doing │────►│ Get todo    │────►│ Start work  │
-│ (resume?)   │ no  │ (new task)  │ yes │ (implement) │
-└─────────────┘     └─────────────┘     └─────────────┘
-       │ yes                                   │
-       └───────────────────────────────────────┘
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│ Read context     │────►│ harness_next_task│────►│ Start working    │
+│ (LEAD_ENGINEER)  │     │ (MCP tool)       │     │ (implement)      │
+└──────────────────┘     └──────────────────┘     └──────────────────┘
 ```
+
+## MCP Tool Response
+
+The `harness_next_task` tool returns:
+```json
+{
+  "success": true,
+  "task": { "id": "...", "title": "...", "description": "..." },
+  "resumed": false,
+  "message": "Starting task: ...",
+  "remaining_count": 3
+}
+```
+
+- `resumed: true` means continuing an in-progress task
+- `resumed: false` means starting a new task
+- `remaining_count` shows how many todo tasks remain
+
+## Key Files Reference
+
+- **Your context:** `docs/LEAD_ENGINEER.md`
+- **Architecture:** `docs/ARCHITECTURE_REFERENCE.md`
+- **Roadmap:** `docs/ROADMAP.md`
+- **Harness code:** `python/src/mcp_server/features/harness/harness_tools.py`
