@@ -116,6 +116,19 @@ sshfs ja@sff-workstation.tail10d594.ts.net:/home/ja/archon ~/archon-remote
 claude mcp add --transport http archon http://localhost:8051/mcp
 ```
 
+**MCP session invalid after server restart:**
+
+When the MCP server restarts (e.g., `docker compose restart archon-mcp`), Claude Code sessions become invalid. You'll see:
+- "No valid session ID provided" errors
+- MCP tool calls failing
+
+**Fix:** Restart Claude Code:
+1. Exit current session (`exit` or Ctrl+C)
+2. Start new session (`claude` or `ssh do-a2`)
+3. Use `/resume` to restore conversation context if needed
+
+**Why this happens:** MCP uses session IDs for request tracking. When the server restarts, existing sessions are invalidated. Claude Code needs to establish a new session.
+
 ## Git
 
 **Fork:** https://github.com/stefans71/Archon-V2
