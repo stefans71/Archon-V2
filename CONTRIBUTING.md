@@ -119,6 +119,74 @@ Test these things using both the UI and the MCP server. This process will be sim
 
 **7. If your code changes touch the MCP server instructions or anything else more high level** that could affect how AI coding assistants use the Archon MCP, please retest by creating a simple project from scratch that leverages Archon for RAG, task management, etc.
 
+## 📝 Git Commit Message Format
+
+All commits should follow this format for consistency:
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `feat` | New feature or functionality |
+| `fix` | Bug fix |
+| `docs` | Documentation only changes |
+| `refactor` | Code restructuring without behavior change |
+| `test` | Adding or updating tests |
+| `chore` | Maintenance, dependencies, tooling |
+
+### Scopes
+
+| Scope | Description |
+|-------|-------------|
+| `harness` | Harness system (task automation) |
+| `mcp` | MCP server and tools |
+| `server` | FastAPI backend |
+| `ui` | React frontend |
+| `docs` | Documentation files |
+| `infra` | Docker, CI/CD, infrastructure |
+| `rag` | RAG/knowledge base features |
+
+### Guidelines
+
+- **Subject**: Use imperative mood ("add feature" not "added feature"), max 50 chars
+- **Body**: Explain what and why, use bullet points for multiple changes
+- **Footer**: Include `Task-ID: <uuid>` when working on tracked tasks
+
+### Examples
+
+```
+feat(harness): add configurable git execution mode for SSHFS
+
+- Add git_config.py with local/remote execution modes
+- Rewrite _perform_git_commit() with async subprocess
+
+Task-ID: 47816e8b-bc8f-432d-846b-346856c84848
+```
+
+```
+fix(server): resolve race condition in crawl progress tracking
+
+- Add lock around progress updates
+- Prevent duplicate completion events
+```
+
+### Automated Commits
+
+The `harness_complete` MCP tool generates commits automatically:
+```
+feat: <task_title>
+
+Task-ID: <task_id>
+```
+
 ## 🔄 Contribution Process
 
 ### 1. Choose Your Contribution
