@@ -451,6 +451,78 @@ async def _get_todo_count(client: httpx.AsyncClient, api_url: str, project_id: s
     return 0
 
 
+async def _run_git_command(
+    args: list[str],
+    timeout_seconds: int,
+    cwd: str | None = None,
+) -> tuple[int, str, str]:
+    """
+    Run a git command asynchronously with timeout.
+
+    Args:
+        args: Command arguments (e.g., ["git", "status"])
+        timeout_seconds: Timeout in seconds
+        cwd: Working directory (optional)
+
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+
+    Raises:
+        asyncio.TimeoutError: If command times out
+    """
+    import asyncio
+
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(),
+            timeout=timeout_seconds,
+        )
+        return process.returncode or 0, stdout.decode(), stderr.decode()
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+
+
+async def _run_remote_git_command(
+    git_args: list[str],
+    config: "GitConfig",
+) -> tuple[int, str, str]:
+    """
+    Run a git command on a remote server via SSH.
+
+    Args:
+        git_args: Git command arguments (e.g., ["add", "-A"])
+        config: Git configuration with remote settings
+
+    Returns:
+        Tuple of (return_code, stdout, stderr)
+    """
+    import asyncio
+    import shlex
+
+    # Build the remote command
+    git_cmd = " ".join(shlex.quote(arg) for arg in ["git"] + git_args)
+    remote_cmd = f"cd {shlex.quote(config.remote_path)} && {git_cmd}"
+
+    ssh_args = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        config.ssh_target,
+        remote_cmd,
+    ]
+
+    return await _run_git_command(ssh_args, config.timeout_seconds)
+
+
 async def _perform_git_commit(
     task_title: str,
     commit_message: str | None,
@@ -459,72 +531,92 @@ async def _perform_git_commit(
     """
     Perform git add and commit operations.
 
-    Returns commit info dict or None if git operations failed/skipped.
+    Supports two execution modes based on GIT_EXECUTION_MODE env var:
+    - local: Run git commands directly (default)
+    - remote: Run git commands via SSH on a remote server
+
+    Remote mode is useful when working over SSHFS where local git
+    operations can be slow or unreliable.
+
+    Environment variables for remote mode:
+        GIT_EXECUTION_MODE=remote
+        GIT_REMOTE_HOST=hostname
+        GIT_REMOTE_USER=username
+        GIT_REMOTE_PATH=/path/to/repo
+        GIT_OPERATION_TIMEOUT=60
+
+    Returns:
+        dict with commit info or skip reason
     """
     import asyncio
-    import subprocess
+
+    from src.mcp_server.utils.git_config import GitConfig, get_git_config
+
+    try:
+        config = get_git_config()
+    except ValueError as e:
+        logger.error(f"Git config error: {e}")
+        return {"skipped": True, "reason": f"Configuration error: {e}"}
+
+    async def run_git(args: list[str]) -> tuple[int, str, str]:
+        """Run git command using configured mode."""
+        if config.is_remote:
+            return await _run_remote_git_command(args, config)
+        else:
+            return await _run_git_command(
+                ["git"] + args,
+                config.timeout_seconds,
+            )
 
     try:
         # Check if we're in a git repository
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-dir"],
-            capture_output=True,
-            text=True,
-        )
+        returncode, stdout, stderr = await run_git(["rev-parse", "--git-dir"])
 
-        if result.returncode != 0:
+        if returncode != 0:
             logger.warning("Not in a git repository, skipping commit")
             return {"skipped": True, "reason": "Not a git repository"}
 
         # Stage all changes
-        stage_result = subprocess.run(
-            ["git", "add", "-A"],
-            capture_output=True,
-            text=True,
-        )
+        returncode, stdout, stderr = await run_git(["add", "-A"])
 
-        if stage_result.returncode != 0:
-            return {"skipped": True, "reason": f"Git add failed: {stage_result.stderr}"}
+        if returncode != 0:
+            return {"skipped": True, "reason": f"Git add failed: {stderr}"}
 
         # Check if there are changes to commit
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-        )
+        returncode, stdout, stderr = await run_git(["status", "--porcelain"])
 
-        if not status_result.stdout.strip():
+        if not stdout.strip():
             return {"skipped": True, "reason": "No changes to commit"}
 
         # Generate commit message
         if not commit_message:
-            commit_message = f"feat: {task_title}\n\nTask ID: {task_id}"
+            commit_message = f"feat: {task_title}\n\nTask-ID: {task_id}"
 
         # Create commit
-        commit_result = subprocess.run(
-            ["git", "commit", "-m", commit_message],
-            capture_output=True,
-            text=True,
-        )
+        returncode, stdout, stderr = await run_git(["commit", "-m", commit_message])
 
-        if commit_result.returncode != 0:
-            return {"skipped": True, "reason": f"Git commit failed: {commit_result.stderr}"}
+        if returncode != 0:
+            return {"skipped": True, "reason": f"Git commit failed: {stderr}"}
 
         # Get commit hash
-        hash_result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-        )
+        returncode, stdout, stderr = await run_git(["rev-parse", "--short", "HEAD"])
 
-        commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else "unknown"
+        commit_hash = stdout.strip() if returncode == 0 else "unknown"
 
         return {
             "hash": commit_hash,
             "message": commit_message,
             "skipped": False,
+            "mode": config.mode.value,
         }
 
+    except asyncio.TimeoutError:
+        timeout = config.timeout_seconds
+        logger.error(f"Git operation timed out after {timeout}s")
+        return {
+            "skipped": True,
+            "reason": f"Git operation timed out after {timeout} seconds",
+        }
     except Exception as e:
         logger.error(f"Git commit error: {e}")
         return {"skipped": True, "reason": str(e)}

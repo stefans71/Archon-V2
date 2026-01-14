@@ -66,14 +66,38 @@ cd ~/archon-remote
 claude
 ```
 
-## Access Archon UI
-```bash
-# From laptop - create tunnel
+## Laptop Access (IMPORTANT)
+
+The Archon services run on your home server, not your laptop. You need SSH tunnels to access them.
+
+### Archon UI (Required for monitoring)
+```powershell
+# In PowerShell/Terminal on your laptop - keep this open
 ssh -L 3737:localhost:3737 home
-# Then open: http://localhost:3737
 ```
+Then browse to: `http://localhost:3737`
+
+### Archon Server API (Optional - for direct API testing)
+```powershell
+ssh -L 8181:localhost:8181 home
+```
+Then: `http://localhost:8181/docs` for Swagger UI
+
+### Quick Reference
+| Service | Tunnel Command | URL |
+|---------|---------------|-----|
+| UI | `ssh -L 3737:localhost:3737 home` | http://localhost:3737 |
+| API | `ssh -L 8181:localhost:8181 home` | http://localhost:8181/docs |
+| MCP | (handled by DO start script) | http://localhost:8051/mcp |
 
 ## Troubleshooting
+
+**Can't access Archon UI / Firefox error:**
+```powershell
+# On your laptop - UI runs on home server, needs tunnel
+ssh -L 3737:localhost:3737 home
+# Keep terminal open, then browse http://localhost:3737
+```
 
 **Tunnel dropped:**
 ```bash
@@ -98,4 +122,34 @@ claude mcp add --transport http archon http://localhost:8051/mcp
 **Branch:** stable
 ```bash
 git add -A && git commit -m "msg" && git push myfork stable
+```
+
+### Git over SSHFS (Remote Execution)
+
+Git commands over SSHFS can be slow or timeout. The harness tools support running git commands remotely via SSH instead.
+
+**Environment Variables (set on DO VPS):**
+```bash
+# Enable remote git execution
+export GIT_EXECUTION_MODE=remote
+
+# SSH connection details
+export GIT_REMOTE_HOST=sff-workstation.tail10d594.ts.net
+export GIT_REMOTE_USER=ja
+export GIT_REMOTE_PATH=/home/ja/archon
+
+# Timeout in seconds (default: 60)
+export GIT_OPERATION_TIMEOUT=60
+```
+
+**How it works:**
+- `local` mode (default): Runs git commands directly (works when not on SSHFS)
+- `remote` mode: Runs git commands via SSH on the home server
+
+**Add to ~/start-archon.sh:**
+```bash
+export GIT_EXECUTION_MODE=remote
+export GIT_REMOTE_HOST=sff-workstation.tail10d594.ts.net
+export GIT_REMOTE_USER=ja
+export GIT_REMOTE_PATH=/home/ja/archon
 ```
