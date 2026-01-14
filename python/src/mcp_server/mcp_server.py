@@ -67,6 +67,10 @@ _initialization_lock = threading.Lock()
 _initialization_complete = False
 _shared_context = None
 
+# Track module registration errors for visibility in health_check
+_registration_errors: list[dict] = []
+_registration_warnings: list[dict] = []
+
 server_host = "0.0.0.0"  # Listen on all interfaces
 
 # Require ARCHON_MCP_PORT to be set
@@ -358,12 +362,43 @@ async def health_check(ctx: Context) -> str:
         if hasattr(context, "health_status") and context.health_status:
             await perform_health_checks(context)
 
-            return json.dumps({
+            # Check for registration errors - these indicate degraded functionality
+            has_registration_errors = len(_registration_errors) > 0
+
+            # Determine overall status
+            if has_registration_errors:
+                overall_status = "degraded"
+                status_message = f"MCP running with {len(_registration_errors)} module error(s)"
+            elif context.health_status.get("status") == "degraded":
+                overall_status = "degraded"
+                status_message = "Some dependent services unavailable"
+            else:
+                overall_status = "healthy"
+                status_message = "All systems operational"
+
+            response = {
                 "success": True,
+                "status": overall_status,
+                "message": status_message,
                 "health": context.health_status,
                 "uptime_seconds": time.time() - context.startup_time,
                 "timestamp": datetime.now().isoformat(),
-            })
+            }
+
+            # Include registration issues if any
+            if _registration_errors:
+                response["registration_errors"] = [
+                    {"module": e["module"], "type": e["type"], "message": e["message"]}
+                    for e in _registration_errors
+                ]
+
+            if _registration_warnings:
+                response["registration_warnings"] = [
+                    {"module": w["module"], "message": w["message"]}
+                    for w in _registration_warnings
+                ]
+
+            return json.dumps(response)
         else:
             return json.dumps({
                 "success": True,
@@ -422,9 +457,32 @@ async def session_info(ctx: Context) -> str:
 # Import and register modules
 def register_modules():
     """Register all MCP tool modules."""
+    global _registration_errors, _registration_warnings
+
     logger.info("🔧 Registering MCP tool modules...")
 
+    # Clear previous registration state
+    _registration_errors.clear()
+    _registration_warnings.clear()
+
     modules_registered = 0
+
+    def track_warning(module: str, error: Exception):
+        """Track a warning for optional module not available."""
+        _registration_warnings.append({
+            "module": module,
+            "type": "import_warning",
+            "message": str(error),
+        })
+
+    def track_error(module: str, error: Exception, error_type: str = "registration_error"):
+        """Track an error for failed module registration."""
+        _registration_errors.append({
+            "module": module,
+            "type": error_type,
+            "message": str(error),
+            "traceback": traceback.format_exc(),
+        })
 
     # Import and register RAG module (HTTP-based version)
     try:
@@ -435,9 +493,11 @@ def register_modules():
         logger.info("✓ RAG module registered (HTTP-based)")
     except ImportError as e:
         logger.warning(f"⚠ RAG module not available: {e}")
+        track_warning("rag", e)
     except Exception as e:
         logger.error(f"✗ Error registering RAG module: {e}")
         logger.error(traceback.format_exc())
+        track_error("rag", e)
 
     # Import and register all feature tools - separated and focused
 
@@ -449,18 +509,17 @@ def register_modules():
         modules_registered += 1
         logger.info("✓ Project tools registered")
     except ImportError as e:
-        # Module not found - this is acceptable in modular architecture
         logger.warning(f"⚠ Project tools module not available (optional): {e}")
+        track_warning("projects", e)
     except (SyntaxError, NameError, AttributeError) as e:
-        # Code errors that should not be ignored
         logger.error(f"✗ Code error in project tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("projects", e, "code_error")
         raise  # Re-raise to prevent running with broken code
     except Exception as e:
-        # Unexpected errors during registration
         logger.error(f"✗ Failed to register project tools: {e}")
         logger.error(traceback.format_exc())
-        # Don't raise - allow other modules to register
+        track_error("projects", e)
 
     # Task Management Tools
     try:
@@ -471,13 +530,16 @@ def register_modules():
         logger.info("✓ Task tools registered")
     except ImportError as e:
         logger.warning(f"⚠ Task tools module not available (optional): {e}")
+        track_warning("tasks", e)
     except (SyntaxError, NameError, AttributeError) as e:
         logger.error(f"✗ Code error in task tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("tasks", e, "code_error")
         raise
     except Exception as e:
         logger.error(f"✗ Failed to register task tools: {e}")
         logger.error(traceback.format_exc())
+        track_error("tasks", e)
 
     # Document Management Tools
     try:
@@ -488,13 +550,16 @@ def register_modules():
         logger.info("✓ Document tools registered")
     except ImportError as e:
         logger.warning(f"⚠ Document tools module not available (optional): {e}")
+        track_warning("documents", e)
     except (SyntaxError, NameError, AttributeError) as e:
         logger.error(f"✗ Code error in document tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("documents", e, "code_error")
         raise
     except Exception as e:
         logger.error(f"✗ Failed to register document tools: {e}")
         logger.error(traceback.format_exc())
+        track_error("documents", e)
 
     # Version Management Tools
     try:
@@ -505,13 +570,16 @@ def register_modules():
         logger.info("✓ Version tools registered")
     except ImportError as e:
         logger.warning(f"⚠ Version tools module not available (optional): {e}")
+        track_warning("versions", e)
     except (SyntaxError, NameError, AttributeError) as e:
         logger.error(f"✗ Code error in version tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("versions", e, "code_error")
         raise
     except Exception as e:
         logger.error(f"✗ Failed to register version tools: {e}")
         logger.error(traceback.format_exc())
+        track_error("versions", e)
 
     # Feature Management Tools
     try:
@@ -522,13 +590,16 @@ def register_modules():
         logger.info("✓ Feature tools registered")
     except ImportError as e:
         logger.warning(f"⚠ Feature tools module not available (optional): {e}")
+        track_warning("features", e)
     except (SyntaxError, NameError, AttributeError) as e:
         logger.error(f"✗ Code error in feature tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("features", e, "code_error")
         raise
     except Exception as e:
         logger.error(f"✗ Failed to register feature tools: {e}")
         logger.error(traceback.format_exc())
+        track_error("features", e)
 
     # Harness Automation Tools
     try:
@@ -539,13 +610,16 @@ def register_modules():
         logger.info("✓ Harness tools registered")
     except ImportError as e:
         logger.warning(f"⚠ Harness tools module not available (optional): {e}")
+        track_warning("harness", e)
     except (SyntaxError, NameError, AttributeError) as e:
         logger.error(f"✗ Code error in harness tools - MUST FIX: {e}")
         logger.error(traceback.format_exc())
+        track_error("harness", e, "code_error")
         raise
     except Exception as e:
         logger.error(f"✗ Failed to register harness tools: {e}")
         logger.error(traceback.format_exc())
+        track_error("harness", e)
 
     logger.info(f"📦 Total modules registered: {modules_registered}")
 
