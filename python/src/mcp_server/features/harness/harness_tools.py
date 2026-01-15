@@ -363,6 +363,8 @@ def register_harness_tools(mcp: FastMCP):
         """
         Mark a task as done and optionally commit changes to git.
 
+        Also appends a timestamped entry to CHANGELOG.md under [Unreleased].
+
         Args:
             task_id: UUID of the task to complete
             commit_message: Optional custom commit message.
@@ -377,6 +379,9 @@ def register_harness_tools(mcp: FastMCP):
             - commit: dict|null - Git commit info if auto_commit was True
               - hash: str - Commit hash
               - message: str - Commit message used
+            - changelog: dict|null - Changelog entry info
+              - entry: str - The entry that was added
+              - section: str - Which section (Added/Changed/Fixed)
             - error: str|null - Error message if failed
 
         Note:
@@ -431,11 +436,26 @@ def register_harness_tools(mcp: FastMCP):
                 except Exception as e:
                     logger.debug(f"Could not clear checkpoint for task {task_id}: {e}")
 
+                # Append entry to CHANGELOG.md
+                changelog_result = None
+                try:
+                    changelog_result = await _append_changelog_entry(
+                        task_title=task.get("title", "Task completed"),
+                        task_id=task_id,
+                    )
+                    if changelog_result.get("success"):
+                        logger.info(f"Added changelog entry: {changelog_result.get('entry')}")
+                    else:
+                        logger.warning(f"Could not update changelog: {changelog_result.get('error')}")
+                except Exception as e:
+                    logger.debug(f"Could not update changelog for task {task_id}: {e}")
+
                 return json.dumps({
                     "success": True,
                     "task": task,
                     "commit": commit_info,
                     "checkpoint_cleared": checkpoint_cleared,
+                    "changelog": changelog_result,
                     "message": f"Task completed: {task.get('title')}",
                 })
 
@@ -960,3 +980,136 @@ async def _get_checkpoint_for_task(task_id: str) -> dict | None:
     except Exception as e:
         logger.debug(f"Error retrieving checkpoint for task {task_id}: {e}")
         return None
+
+
+async def _append_changelog_entry(
+    task_title: str,
+    task_id: str,
+    entry_type: str = "Added",
+) -> dict:
+    """
+    Append an entry to CHANGELOG.md under the [Unreleased] section.
+
+    Args:
+        task_title: Title of the completed task
+        task_id: UUID of the task (for traceability)
+        entry_type: One of "Added", "Changed", "Fixed" (default: "Added")
+
+    Returns:
+        dict with success status and details
+    """
+    import re
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    # Validate entry type
+    valid_types = ["Added", "Changed", "Fixed"]
+    if entry_type not in valid_types:
+        entry_type = "Added"
+
+    # Determine changelog file location (repo root)
+    try:
+        import asyncio
+
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        if process.returncode == 0:
+            repo_root = Path(stdout.decode().strip())
+        else:
+            repo_root = Path.cwd()
+    except Exception:
+        repo_root = Path.cwd()
+
+    changelog_path = repo_root / "CHANGELOG.md"
+
+    if not changelog_path.exists():
+        return {
+            "success": False,
+            "error": "CHANGELOG.md not found",
+            "file_path": str(changelog_path),
+        }
+
+    try:
+        # Read existing content
+        with open(changelog_path, "r") as f:
+            content = f.read()
+
+        # Generate timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+        # Format the entry
+        # Extract type and scope from task title if it follows convention
+        # e.g., "feat(harness): add checkpoint" -> "harness", "add checkpoint"
+        commit_match = re.match(r"^(feat|fix|docs|refactor|test|chore)\((\w+)\):\s*(.+)$", task_title, re.IGNORECASE)
+        if commit_match:
+            commit_type, scope, description = commit_match.groups()
+            # Map commit types to changelog sections
+            type_mapping = {
+                "feat": "Added",
+                "fix": "Fixed",
+                "docs": "Added",
+                "refactor": "Changed",
+                "test": "Added",
+                "chore": "Changed",
+            }
+            entry_type = type_mapping.get(commit_type.lower(), entry_type)
+            entry_text = f"- **{timestamp}** - {commit_type}({scope}): {description} (Task: {task_id[:8]})"
+        else:
+            # Use title as-is
+            entry_text = f"- **{timestamp}** - {task_title} (Task: {task_id[:8]})"
+
+        # Find the correct section under [Unreleased]
+        # Pattern: ## [Unreleased] ... ### <entry_type>
+        unreleased_pattern = r"(## \[Unreleased\].*?)(### " + entry_type + r"\n)"
+        unreleased_match = re.search(unreleased_pattern, content, re.DOTALL)
+
+        if unreleased_match:
+            # Insert after the ### <entry_type> header
+            insert_pos = unreleased_match.end()
+            new_content = content[:insert_pos] + entry_text + "\n" + content[insert_pos:]
+        else:
+            # Section doesn't exist under Unreleased, try to add it
+            unreleased_header = re.search(r"(## \[Unreleased\]\n)", content)
+            if unreleased_header:
+                # Find the next section after [Unreleased]
+                next_section = re.search(r"\n(### \w+)", content[unreleased_header.end():])
+                if next_section:
+                    # Insert new section before existing sections
+                    insert_pos = unreleased_header.end() + next_section.start()
+                    new_section = f"\n### {entry_type}\n{entry_text}\n"
+                    new_content = content[:insert_pos] + new_section + content[insert_pos:]
+                else:
+                    # No sections yet, add after [Unreleased]
+                    insert_pos = unreleased_header.end()
+                    new_section = f"\n### {entry_type}\n{entry_text}\n"
+                    new_content = content[:insert_pos] + new_section + content[insert_pos:]
+            else:
+                # No [Unreleased] section, can't update
+                return {
+                    "success": False,
+                    "error": "[Unreleased] section not found in CHANGELOG.md",
+                    "file_path": str(changelog_path),
+                }
+
+        # Write updated content
+        with open(changelog_path, "w") as f:
+            f.write(new_content)
+
+        return {
+            "success": True,
+            "entry": entry_text,
+            "section": entry_type,
+            "file_path": str(changelog_path),
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating CHANGELOG.md: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "file_path": str(changelog_path),
+        }

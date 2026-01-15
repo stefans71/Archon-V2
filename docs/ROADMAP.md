@@ -349,7 +349,7 @@ Claude (in harness) ──► CONTAINED to work on user's project
 
 ### Phase 2: Context Persistence (NEXT)
 - [x] Store PRP in RAG on project creation
-- [ ] Implement checkpoint system (file + database)
+- [x] Implement checkpoint system (file + database)
 - [ ] Add timestamps to CHANGELOG on /harness-done
 - [ ] Token estimation for task sizing
 

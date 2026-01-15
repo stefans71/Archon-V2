@@ -2,6 +2,14 @@
 
 Mark the current task as complete using the MCP tool.
 
+## What Happens
+
+When you complete a task with `harness_complete`, it automatically:
+1. Marks the task status as "done"
+2. Clears any saved checkpoint for the task
+3. **Appends a timestamped entry to CHANGELOG.md** under `[Unreleased]`
+4. Optionally creates a git commit (if `auto_commit=True`)
+
 ## Instructions
 
 1. First, find the current "doing" task:
@@ -70,4 +78,36 @@ git add <files>
 git commit -m "feat(<scope>): <description>
 
 Task-ID: <task_id>"
+```
+
+## Changelog Entry Format
+
+The tool automatically appends entries to `CHANGELOG.md` under `## [Unreleased]`:
+
+```markdown
+### Added
+- **2026-01-15 06:30** - Implement checkpoint system for task progress (Task: 1852208f)
+```
+
+**Entry placement:**
+- Task titles starting with `feat(...)` → `### Added`
+- Task titles starting with `fix(...)` → `### Fixed`
+- Task titles starting with `refactor(...)` or `chore(...)` → `### Changed`
+- Other titles → `### Added` (default)
+
+**Entry format:**
+```
+- **YYYY-MM-DD HH:MM** - <task_title> (Task: <short_id>)
+```
+
+The changelog response is included in the tool output:
+```json
+{
+  "changelog": {
+    "success": true,
+    "entry": "- **2026-01-15 06:30** - ...",
+    "section": "Added",
+    "file_path": "/path/to/CHANGELOG.md"
+  }
+}
 ```

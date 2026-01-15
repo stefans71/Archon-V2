@@ -91,7 +91,7 @@ I do NOT write implementation code directly. I create tasks and the Lead Enginee
 | Task | ID | Priority |
 |------|-----|----------|
 | Store PRP in RAG on project creation | `12e2013d-cef6-4dfd-bb0a-301778195d55` | 100 | ✅ |
-| Implement checkpoint system | `15bc3615-509f-418e-bd24-d02e593833e5` | 200 |
+| Implement checkpoint system | `15bc3615-509f-418e-bd24-d02e593833e5` | 200 | ✅ |
 | Add timestamps to CHANGELOG on /harness-done | `1852208f-de3a-452e-816b-cc6310fe64f0` | 300 |
 | Token estimation for task sizing | `4364c503-4471-42b2-bbe5-1abe553c792e` | 400 |
 
