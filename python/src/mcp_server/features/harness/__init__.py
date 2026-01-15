@@ -5,6 +5,7 @@ This module provides tools for task automation workflows:
 - harness_initialize: Parse specs and create tasks automatically
 - harness_next_task: Get next todo task with smart selection
 - harness_complete: Mark task done and optionally commit to git
+- harness_checkpoint: Save/load task progress for context persistence
 """
 
 from .harness_tools import register_harness_tools

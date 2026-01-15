@@ -5,6 +5,7 @@ This module provides tools for task automation workflows:
 - harness_initialize: Parse specs and create tasks automatically
 - harness_next_task: Get next todo task with smart selection
 - harness_complete: Mark task done and optionally commit to git
+- harness_checkpoint: Save/load task progress for context persistence
 
 Uses HTTP calls to the server service for task operations.
 """
@@ -213,6 +214,11 @@ def register_harness_tools(mcp: FastMCP):
               - content: str - The full PRP/specification text
               - source_id: str - RAG source identifier
               - url: str - Internal URL for the PRP
+            - checkpoint: dict|null - Saved progress for resumed tasks
+              - step: int - Current step number
+              - files_modified: list - Files changed so far
+              - next_action: str - What to do next
+              - timestamp: str - When checkpoint was saved
 
         Workflow:
             1. Check for existing "doing" tasks (resume incomplete work)
@@ -256,6 +262,9 @@ def register_harness_tools(mcp: FastMCP):
                         # Get PRP context for the project
                         prp_context = await _get_prp_context(project_id)
 
+                        # Get checkpoint data for resumed task
+                        checkpoint = await _get_checkpoint_for_task(task.get("id"))
+
                         return json.dumps({
                             "success": True,
                             "task": task,
@@ -263,6 +272,7 @@ def register_harness_tools(mcp: FastMCP):
                             "message": f"Resuming in-progress task: {task.get('title')}",
                             "remaining_count": todo_count,
                             "prp": prp_context,
+                            "checkpoint": checkpoint,
                         })
 
                 # No doing task, get next todo task
@@ -332,6 +342,7 @@ def register_harness_tools(mcp: FastMCP):
                     "message": f"Starting task: {next_task.get('title')}",
                     "remaining_count": len(todo_tasks) - 1,
                     "prp": prp_context,
+                    "checkpoint": None,
                 })
 
         except httpx.RequestError as e:
@@ -412,10 +423,19 @@ def register_harness_tools(mcp: FastMCP):
                         task_id=task_id,
                     )
 
+                # Clear checkpoint for completed task
+                checkpoint_cleared = False
+                try:
+                    await _manage_checkpoint(task_id=task_id, clear=True)
+                    checkpoint_cleared = True
+                except Exception as e:
+                    logger.debug(f"Could not clear checkpoint for task {task_id}: {e}")
+
                 return json.dumps({
                     "success": True,
                     "task": task,
                     "commit": commit_info,
+                    "checkpoint_cleared": checkpoint_cleared,
                     "message": f"Task completed: {task.get('title')}",
                 })
 
@@ -426,6 +446,74 @@ def register_harness_tools(mcp: FastMCP):
         except Exception as e:
             logger.error(f"Error completing task: {e}", exc_info=True)
             return MCPErrorFormatter.from_exception(e, "complete task")
+
+    @mcp.tool()
+    async def harness_checkpoint(
+        ctx: Context,
+        task_id: str,
+        step: int | None = None,
+        files_modified: list[str] | None = None,
+        next_action: str | None = None,
+        notes: str | None = None,
+        clear: bool = False,
+    ) -> str:
+        """
+        Save or retrieve checkpoint data for task progress persistence.
+
+        Checkpoints allow work to resume after context compaction by storing:
+        - Current step in implementation
+        - Files modified so far
+        - Next action to take
+        - Optional notes
+
+        Args:
+            task_id: UUID of the task to checkpoint
+            step: Current step number in implementation (1-indexed)
+            files_modified: List of file paths modified during this task
+            next_action: Description of the next action to take
+            notes: Optional notes about current state or blockers
+            clear: If True, clears the checkpoint for this task
+
+        Returns:
+            JSON with structure:
+            - success: bool - Whether checkpoint operation succeeded
+            - checkpoint: dict|null - The checkpoint data (if exists)
+            - message: str - Status message
+            - file_path: str - Path to the checkpoint file
+
+        Usage:
+            Save checkpoint:
+                harness_checkpoint(task_id="...", step=3, files_modified=["src/foo.py"],
+                                  next_action="Add error handling")
+
+            Get checkpoint (no other args):
+                harness_checkpoint(task_id="...")
+
+            Clear checkpoint:
+                harness_checkpoint(task_id="...", clear=True)
+        """
+        try:
+            if not task_id:
+                return MCPErrorFormatter.format_error(
+                    error_type="validation_error",
+                    message="task_id is required",
+                    suggestion="Provide a valid task UUID",
+                )
+
+            checkpoint_result = await _manage_checkpoint(
+                task_id=task_id,
+                step=step,
+                files_modified=files_modified,
+                next_action=next_action,
+                notes=notes,
+                clear=clear,
+            )
+
+            return json.dumps(checkpoint_result)
+
+        except Exception as e:
+            logger.error(f"Error managing checkpoint: {e}", exc_info=True)
+            return MCPErrorFormatter.from_exception(e, "manage checkpoint")
 
     logger.info("Harness tools registered")
 
@@ -692,3 +780,183 @@ async def _perform_git_commit(
     except Exception as e:
         logger.error(f"Git commit error: {e}")
         return {"skipped": True, "reason": str(e)}
+
+
+async def _manage_checkpoint(
+    task_id: str,
+    step: int | None = None,
+    files_modified: list[str] | None = None,
+    next_action: str | None = None,
+    notes: str | None = None,
+    clear: bool = False,
+) -> dict:
+    """
+    Manage checkpoint data for a task.
+
+    Checkpoints are stored in .harness/checkpoint.json in the repository root.
+
+    Args:
+        task_id: UUID of the task
+        step: Current step number
+        files_modified: List of modified file paths
+        next_action: Description of next action
+        notes: Optional notes
+        clear: If True, removes checkpoint for this task
+
+    Returns:
+        dict with operation result
+    """
+    import os
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    # Determine checkpoint file location
+    # Try to find repo root via git, fallback to cwd
+    try:
+        import asyncio
+
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        if process.returncode == 0:
+            repo_root = Path(stdout.decode().strip())
+        else:
+            repo_root = Path.cwd()
+    except Exception:
+        repo_root = Path.cwd()
+
+    harness_dir = repo_root / ".harness"
+    checkpoint_file = harness_dir / "checkpoint.json"
+
+    # Load existing checkpoints
+    checkpoints = {}
+    if checkpoint_file.exists():
+        try:
+            with open(checkpoint_file, "r") as f:
+                checkpoints = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Could not read checkpoint file: {e}")
+            checkpoints = {}
+
+    # Handle clear operation
+    if clear:
+        if task_id in checkpoints:
+            del checkpoints[task_id]
+            # Write back
+            harness_dir.mkdir(parents=True, exist_ok=True)
+            with open(checkpoint_file, "w") as f:
+                json.dump(checkpoints, f, indent=2)
+
+            return {
+                "success": True,
+                "checkpoint": None,
+                "message": f"Checkpoint cleared for task {task_id}",
+                "file_path": str(checkpoint_file),
+            }
+        else:
+            return {
+                "success": True,
+                "checkpoint": None,
+                "message": f"No checkpoint found for task {task_id}",
+                "file_path": str(checkpoint_file),
+            }
+
+    # Check if this is a read-only request (only task_id provided)
+    is_read_only = (
+        step is None and
+        files_modified is None and
+        next_action is None and
+        notes is None
+    )
+
+    if is_read_only:
+        # Return existing checkpoint if it exists
+        existing = checkpoints.get(task_id)
+        if existing:
+            return {
+                "success": True,
+                "checkpoint": existing,
+                "message": f"Checkpoint found for task {task_id}",
+                "file_path": str(checkpoint_file),
+            }
+        else:
+            return {
+                "success": True,
+                "checkpoint": None,
+                "message": f"No checkpoint found for task {task_id}",
+                "file_path": str(checkpoint_file),
+            }
+
+    # Save/update checkpoint
+    existing_checkpoint = checkpoints.get(task_id, {})
+
+    # Build updated checkpoint, merging with existing data
+    updated_checkpoint = {
+        "task_id": task_id,
+        "step": step if step is not None else existing_checkpoint.get("step"),
+        "files_modified": files_modified if files_modified is not None else existing_checkpoint.get("files_modified", []),
+        "next_action": next_action if next_action is not None else existing_checkpoint.get("next_action"),
+        "notes": notes if notes is not None else existing_checkpoint.get("notes"),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "created_at": existing_checkpoint.get("created_at", datetime.now(timezone.utc).isoformat()),
+    }
+
+    # Remove None values for cleaner JSON
+    updated_checkpoint = {k: v for k, v in updated_checkpoint.items() if v is not None}
+
+    checkpoints[task_id] = updated_checkpoint
+
+    # Ensure directory exists and write file
+    harness_dir.mkdir(parents=True, exist_ok=True)
+    with open(checkpoint_file, "w") as f:
+        json.dump(checkpoints, f, indent=2)
+
+    # Also add .harness to .gitignore if it doesn't exist
+    gitignore_path = repo_root / ".gitignore"
+    harness_pattern = ".harness/"
+    try:
+        if gitignore_path.exists():
+            with open(gitignore_path, "r") as f:
+                gitignore_content = f.read()
+            if harness_pattern not in gitignore_content:
+                with open(gitignore_path, "a") as f:
+                    f.write(f"\n# Harness checkpoint files\n{harness_pattern}\n")
+                logger.info("Added .harness/ to .gitignore")
+        else:
+            with open(gitignore_path, "w") as f:
+                f.write(f"# Harness checkpoint files\n{harness_pattern}\n")
+            logger.info("Created .gitignore with .harness/")
+    except IOError as e:
+        logger.warning(f"Could not update .gitignore: {e}")
+
+    return {
+        "success": True,
+        "checkpoint": updated_checkpoint,
+        "message": f"Checkpoint saved for task {task_id}",
+        "file_path": str(checkpoint_file),
+    }
+
+
+async def _get_checkpoint_for_task(task_id: str) -> dict | None:
+    """
+    Get checkpoint data for a task if it exists.
+
+    This is used by harness_next_task to include checkpoint in response.
+
+    Args:
+        task_id: UUID of the task
+
+    Returns:
+        Checkpoint data dict or None
+    """
+    try:
+        result = await _manage_checkpoint(task_id=task_id)
+        if result.get("success") and result.get("checkpoint"):
+            return result["checkpoint"]
+        return None
+    except Exception as e:
+        logger.debug(f"Error retrieving checkpoint for task {task_id}: {e}")
+        return None

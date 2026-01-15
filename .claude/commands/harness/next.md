@@ -66,6 +66,13 @@ The `harness_next_task` tool returns:
     "content": "The original specification/requirements...",
     "source_id": "prp_<project_id>",
     "url": "archon://projects/<project_id>/prp"
+  },
+  "checkpoint": {
+    "task_id": "...",
+    "step": 3,
+    "files_modified": ["src/foo.py", "tests/test_foo.py"],
+    "next_action": "Add error handling to parse function",
+    "timestamp": "2026-01-14T06:30:00Z"
   }
 }
 ```
@@ -76,6 +83,10 @@ The `harness_next_task` tool returns:
 - `prp` contains the Project Requirements Plan (if stored via /harness-init)
   - Use the PRP content to understand the original requirements
   - The PRP survives context compaction and is searchable via RAG
+- `checkpoint` contains saved progress (only present when resuming)
+  - Use this to continue where you left off
+  - Shows files already modified and next action to take
+  - Save new checkpoints with `/harness-checkpoint` or the MCP tool
 
 ## Key Files Reference
 
