@@ -1,3 +1,11 @@
+---
+name: prp-claude-code-execute
+description: |
+  Execute a PRP for one-pass implementation success.
+  Follows the PRP to implement features correctly on first attempt.
+argument-hint: <PRP file path>
+---
+
 # Execute BASE PRP
 
 ## PRP File: $ARGUMENTS

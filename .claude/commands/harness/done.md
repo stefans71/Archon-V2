@@ -1,3 +1,10 @@
+---
+name: harness-done
+description: |
+  Mark the current task as complete.
+  Optionally creates a git commit and updates CHANGELOG.md.
+---
+
 # Harness Done
 
 Mark the current task as complete using the MCP tool.

@@ -1,3 +1,11 @@
+---
+name: harness-init
+description: |
+  Initialize a project from a specification.
+  Parses the spec and creates tasks in Archon automatically.
+argument-hint: <specification text>
+---
+
 # Harness Initialize
 
 Initialize a project from a specification by creating tasks in Archon.

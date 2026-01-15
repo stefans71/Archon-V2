@@ -1,3 +1,10 @@
+---
+name: harness-checkpoint
+description: |
+  Save or retrieve task progress for context persistence.
+  Helps resume work after session restarts or context compaction.
+---
+
 # Harness Checkpoint
 
 Save or retrieve task progress for context persistence across sessions.

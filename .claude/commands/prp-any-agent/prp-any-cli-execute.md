@@ -1,3 +1,11 @@
+---
+name: prp-any-cli-execute
+description: |
+  Execute a PRP to implement a feature.
+  Reads the PRP file and follows the implementation plan.
+argument-hint: <PRP file path>
+---
+
 # Execute BASE PRP
 
 Implement a feature using using the PRP file.

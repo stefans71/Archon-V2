@@ -1,3 +1,11 @@
+---
+name: prp-any-cli-create
+description: |
+  Generate a complete PRP for general feature implementation.
+  Performs research and creates context for AI agents.
+argument-hint: <feature file path>
+---
+
 # Create PRP
 
 ## Feature file: $ARGUMENTS

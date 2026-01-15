@@ -1,3 +1,10 @@
+---
+name: harness-status
+description: |
+  Show project progress overview.
+  Displays task counts by status and current phase.
+---
+
 # Harness Status
 
 Show project progress overview.

@@ -1,3 +1,11 @@
+---
+name: prp-claude-code-create
+description: |
+  Create a comprehensive PRP for one-pass implementation success.
+  Performs systematic research and context curation.
+argument-hint: <feature description>
+---
+
 # Create BASE PRP
 
 ## Feature: $ARGUMENTS
