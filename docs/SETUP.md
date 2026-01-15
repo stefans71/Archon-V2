@@ -131,10 +131,19 @@ When the MCP server restarts (e.g., `docker compose restart archon-mcp`), Claude
 
 ## Git
 
-**Fork:** https://github.com/stefans71/Archon-V2
-**Branch:** stable
+**Upstream (Cole's):** https://github.com/coleam00/archon
+**Fork (ours):** git@github.com:stefans71/Archon-V2.git
+**Branch:** main
+
 ```bash
-git add -A && git commit -m "msg" && git push myfork stable
+# Set remote to our fork (SSH - keys already configured)
+git remote set-url origin git@github.com:stefans71/Archon-V2.git
+
+# Push changes
+git push
+
+# Or explicit
+git push origin main
 ```
 
 ### Git over SSHFS (Remote Execution)

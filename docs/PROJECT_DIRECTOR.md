@@ -3,6 +3,30 @@
 > This file maintains context for the Project Director role (Claude Opus 4.5 on DO VPS).
 > Read this file to resume a session or understand the current state of V2 development.
 
+---
+
+## Quick Resume (START HERE)
+
+**Working Directory:** `/root/archon-remote/` (NOT `/root/`)
+
+**Immediately after reading this file, run these MCP calls:**
+
+```python
+# 1. Check if any task is in progress
+find_tasks(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", filter_by="status", filter_value="doing")
+
+# 2. Check todo queue
+find_tasks(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", filter_by="status", filter_value="todo")
+```
+
+**Then report to user:**
+- Current phase and status
+- Any task in "doing" (Engineer may be working on it)
+- Next task in queue
+- Await instructions
+
+---
+
 ## My Role
 
 I am the **Project Director** for Archon V2 development. My responsibilities:
@@ -26,21 +50,9 @@ I do NOT write implementation code directly. I create tasks and the Lead Enginee
 - **Purpose:** Internal dogfooding - using Archon to build Archon
 
 ### Development Phase
-- **Current Phase:** Phase 1 - Stability ✅ COMPLETE
-- **Status:** Ready for Phase 2
-- **Focus:** Context persistence for surviving autocompact
-
-### Active Tasks (Phase 1)
-| Task | ID | Priority | Status |
-|------|-----|----------|--------|
-| Fix git operations over SSHFS | `47816e8b-bc8f-432d-846b-346856c84848` | 100 | done |
-| Create .env.example file | `d9f4705d-f3d3-4d2d-b39a-83e41308c365` | 150 | done |
-| Update /harness-done to use MCP tool | `af7de04c-0270-4cdc-bab4-ea3bbcd6c155` | 175 | done |
-| Improve /harness-next context injection | `abf90967-dd4f-4803-92dd-e5bee6f4ed82` | 180 | done |
-| Add MCP tool error visibility | `d473f175-aa19-41b0-a445-c14e8315cf7f` | 200 | done |
-| Define git commit structure | `b6e30b5e-f585-433e-98f5-d94a4dd75e5c` | 300 | done |
-| Document MCP reconnection requirement | `286dbd40-dac6-4a18-9a4d-1fc632c9ce4c` | 350 | done |
-| Create CHANGELOG.md | `11611d35-d33e-42a6-804f-9c30180e74cb` | 400 | done |
+- **Current Phase:** Phase 2 - Context Persistence
+- **Status:** 3/4 tasks complete
+- **Focus:** Surviving autocompact, checkpoints, changelog automation
 
 ---
 
@@ -87,13 +99,13 @@ I do NOT write implementation code directly. I create tasks and the Lead Enginee
 - [x] Define git commit structure
 - [x] Document MCP reconnection requirement
 
-### Phase 2: Context Persistence (NEXT)
-| Task | ID | Priority |
-|------|-----|----------|
+### Phase 2: Context Persistence (ACTIVE)
+| Task | ID | Priority | Status |
+|------|-----|----------|--------|
 | Store PRP in RAG on project creation | `12e2013d-cef6-4dfd-bb0a-301778195d55` | 100 | ✅ |
 | Implement checkpoint system | `15bc3615-509f-418e-bd24-d02e593833e5` | 200 | ✅ |
-| Add timestamps to CHANGELOG on /harness-done | `1852208f-de3a-452e-816b-cc6310fe64f0` | 300 |
-| Token estimation for task sizing | `4364c503-4471-42b2-bbe5-1abe553c792e` | 400 |
+| Add timestamps to CHANGELOG on /harness-done | `1852208f-de3a-452e-816b-cc6310fe64f0` | 300 | ✅ |
+| Token estimation for task sizing | `4364c503-4471-42b2-bbe5-1abe553c792e` | 400 | ⬜ |
 
 ### Phase 3: Project Lifecycle
 | Task | ID | Priority |
@@ -111,21 +123,14 @@ See `docs/ROADMAP.md` for full details.
 
 ## How to Resume
 
-### If Starting Fresh Session
-
-1. **Read this file** to understand current state
-2. **Check tasks:**
-   ```
-   find_tasks(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", filter_by="status", filter_value="todo")
-   ```
-3. **Review roadmap:** `docs/ROADMAP.md`
-4. **Continue from where we left off**
+See **Quick Resume** section at top of this file.
 
 ### If User Asks "What were we working on?"
 
 Summarize:
-- Current phase and focus
-- Active tasks from the table above
+- Current phase and focus (from Development Phase section)
+- Any task in "doing" status (Engineer may be mid-task)
+- Next todo task in queue
 - Any blockers or decisions needed
 
 ### To Create New Tasks
@@ -135,10 +140,10 @@ manage_task(
     action="create",
     project_id="b903113d-2a15-4225-888d-c4ff2a8d4389",
     title="Task title",
-    description="Detailed description with acceptance criteria",
+    description="See Task Writing Guide below for template",
     status="todo",
-    feature="Phase X: Name",
-    task_order=500  # Higher = lower priority
+    feature="Phase N: Name",
+    task_order=500  # Lower = higher priority
 )
 ```
 
@@ -154,6 +159,57 @@ The Lead Engineer (Claude DO-a2) picks up tasks via `/harness-next`. To assign w
 4. Engineer implements and runs `/harness-done`
 
 I can also write files directly via SSHFS at `~/archon-remote/`.
+
+---
+
+## Task Writing Guide
+
+### Task Description Template
+
+I write tasks with this consistent format:
+
+```markdown
+**Goal:** One sentence describing what this accomplishes.
+
+**Problem:** (if applicable) What issue this addresses.
+
+**Implementation:**
+1. Step one
+2. Step two
+3. Step three
+
+**Acceptance Criteria:**
+- [ ] Criterion one
+- [ ] Criterion two
+- [ ] Criterion three
+
+**Files to modify/create:**
+- `path/to/file.py`
+- `path/to/other.md`
+```
+
+### Priority Numbering Convention
+
+- **Lower number = Higher priority** (task_order field)
+- Use increments of ~50-100 to leave room for insertion
+- Phase 1: 100-400
+- Phase 2: 100-400 (resets per phase)
+- Phase 3: 500-700
+- Phase 4+: 800+
+
+### Feature Naming Convention
+
+Use `"Phase N: Name"` format for the feature field:
+- `"Phase 1: Stability"`
+- `"Phase 2: Context Persistence"`
+- `"Phase 3: Project Lifecycle"`
+
+### After Engineer Completes a Task
+
+1. Verify task status changed to "done"
+2. Update `docs/PROJECT_DIRECTOR.md` - mark task ✅ in phase table
+3. Update `docs/ROADMAP.md` - check off the item
+4. Update timestamp at bottom of PROJECT_DIRECTOR.md
 
 ---
 
@@ -185,4 +241,4 @@ I can also write files directly via SSHFS at `~/archon-remote/`.
 
 ---
 
-*Last Updated: January 14, 2026*
+*Last Updated: January 15, 2026*

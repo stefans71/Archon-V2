@@ -347,10 +347,10 @@ Claude (in harness) ──► CONTAINED to work on user's project
 - [x] Define git commit structure
 - [x] Document MCP reconnection requirement
 
-### Phase 2: Context Persistence (NEXT)
+### Phase 2: Context Persistence (ACTIVE)
 - [x] Store PRP in RAG on project creation
 - [x] Implement checkpoint system (file + database)
-- [ ] Add timestamps to CHANGELOG on /harness-done
+- [x] Add timestamps to CHANGELOG on /harness-done
 - [ ] Token estimation for task sizing
 
 ### Phase 3: Project Lifecycle
