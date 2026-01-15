@@ -61,13 +61,21 @@ The `harness_next_task` tool returns:
   "task": { "id": "...", "title": "...", "description": "..." },
   "resumed": false,
   "message": "Starting task: ...",
-  "remaining_count": 3
+  "remaining_count": 3,
+  "prp": {
+    "content": "The original specification/requirements...",
+    "source_id": "prp_<project_id>",
+    "url": "archon://projects/<project_id>/prp"
+  }
 }
 ```
 
 - `resumed: true` means continuing an in-progress task
 - `resumed: false` means starting a new task
 - `remaining_count` shows how many todo tasks remain
+- `prp` contains the Project Requirements Plan (if stored via /harness-init)
+  - Use the PRP content to understand the original requirements
+  - The PRP survives context compaction and is searchable via RAG
 
 ## Key Files Reference
 

@@ -95,6 +95,8 @@ services:
     depends_on:
       archon-server:
         condition: service_healthy
+    volumes:
+      - ./python/src:/app/src
       
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -180,8 +182,19 @@ services:
       archon-server:
         condition: service_healthy
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: archon-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+
 networks:
   app-network:
     driver: bridge
   supabase_default:
     external: true
+volumes:
+  ollama_data:

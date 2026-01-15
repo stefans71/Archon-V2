@@ -5,16 +5,29 @@ Initialize a project from a specification by creating tasks in Archon.
 ## Instructions
 
 1. Read the project specification provided by the user
-2. Parse it into discrete, implementable features/tasks
-3. For each task, call the MCP tool:
+2. Use the `harness_initialize` MCP tool to parse and create tasks:
 ```
-   manage_task(action="create", project_id="<project_id>", title="<task_title>", description="<detailed_description>", status="todo", assignee="AI IDE Agent")
+harness_initialize(
+    project_id="<project_id>",
+    specification="<the full specification text>",
+    assignee="AI IDE Agent",
+    feature="<optional feature label>"
+)
 ```
-4. Each task description should include:
-   - Clear acceptance criteria
-   - Files likely to be modified
-   - Dependencies on other tasks (if any)
-5. After creating all tasks, summarize what was created
+
+The tool automatically:
+- Parses the specification into discrete tasks
+- Creates tasks with proper ordering
+- **Stores the PRP in RAG for context persistence**
+
+3. After initialization, summarize what was created
+
+## PRP Storage
+
+The specification is stored in the RAG knowledge base as a Project Requirements Plan (PRP):
+- **Survives context compaction** - the original requirements are always retrievable
+- **Searchable via RAG** - use `rag_search_knowledge_base()` to find relevant requirements
+- **Included in /harness-next** - the PRP context is returned when getting the next task
 
 ## Usage
 
@@ -23,10 +36,33 @@ User provides: Project ID (or create new project first)
 
 ## Example
 
-User: "Initialize harness for this spec: Build a REST API with /users and /posts endpoints"
+User: "Initialize harness for project b903113d-... with this spec: Build a REST API with /users and /posts endpoints"
 
-Output:
-- Task 1: "Create /users endpoint" - CRUD operations for users
-- Task 2: "Create /posts endpoint" - CRUD operations for posts  
-- Task 3: "Add authentication middleware"
-- Task 4: "Write API tests"
+```
+harness_initialize(
+    project_id="b903113d-2a15-4225-888d-c4ff2a8d4389",
+    specification="Build a REST API with /users and /posts endpoints",
+    feature="REST API"
+)
+```
+
+Response:
+```json
+{
+  "success": true,
+  "tasks_created": 4,
+  "tasks": [
+    { "id": "...", "title": "Create /users endpoint" },
+    { "id": "...", "title": "Create /posts endpoint" },
+    { "id": "...", "title": "Add authentication middleware" },
+    { "id": "...", "title": "Write API tests" }
+  ],
+  "prp_stored": true,
+  "prp_source_id": "prp_b903113d-..."
+}
+```
+
+## Key Files Reference
+
+- **Harness tools:** `python/src/mcp_server/features/harness/harness_tools.py`
+- **PRP storage:** `python/src/mcp_server/features/harness/prp_storage.py`

@@ -53,7 +53,10 @@ def register_harness_tools(mcp: FastMCP):
             - success: bool - Whether initialization succeeded
             - tasks_created: int - Number of tasks created
             - tasks: list[dict] - Array of created task summaries
-            - error: str|null - Error message if failed
+            - errors: list|null - Array of task creation errors if any
+            - project_id: str - The project ID
+            - prp_stored: bool - Whether the PRP was stored in RAG
+            - prp_source_id: str|null - RAG source ID for the stored PRP
 
         Example specification formats:
             "1. Create user model\\n2. Add authentication\\n3. Write tests"
@@ -92,7 +95,7 @@ def register_harness_tools(mcp: FastMCP):
             errors = []
 
             async with httpx.AsyncClient(timeout=timeout) as client:
-                # First verify project exists
+                # First verify project exists and get project details
                 project_response = await client.get(
                     urljoin(api_url, f"/api/projects/{project_id}")
                 )
@@ -106,6 +109,10 @@ def register_harness_tools(mcp: FastMCP):
                     )
                 elif project_response.status_code != 200:
                     return MCPErrorFormatter.from_http_error(project_response, "verify project")
+
+                # Get project title for PRP storage
+                project_data = project_response.json()
+                project_title = project_data.get("title", "Untitled Project")
 
                 # Create tasks with incrementing order
                 for idx, item in enumerate(task_items):
@@ -141,12 +148,33 @@ def register_harness_tools(mcp: FastMCP):
                             "error": f"HTTP {response.status_code}",
                         })
 
+            # Store PRP in RAG for context persistence
+            prp_result = None
+            if len(created_tasks) > 0:
+                try:
+                    from src.mcp_server.features.harness.prp_storage import store_prp_in_rag
+
+                    prp_result = await store_prp_in_rag(
+                        project_id=project_id,
+                        project_title=project_title,
+                        specification=specification,
+                    )
+                    if prp_result.get("success"):
+                        logger.info(f"PRP stored in RAG for project {project_id}")
+                    else:
+                        logger.warning(f"Failed to store PRP in RAG: {prp_result.get('error')}")
+                except Exception as prp_error:
+                    logger.warning(f"Error storing PRP in RAG (non-fatal): {prp_error}")
+                    prp_result = {"success": False, "error": str(prp_error)}
+
             return json.dumps({
                 "success": len(created_tasks) > 0,
                 "tasks_created": len(created_tasks),
                 "tasks": created_tasks,
                 "errors": errors if errors else None,
                 "project_id": project_id,
+                "prp_stored": prp_result.get("success") if prp_result else False,
+                "prp_source_id": prp_result.get("source_id") if prp_result else None,
             })
 
         except httpx.RequestError as e:
@@ -181,6 +209,10 @@ def register_harness_tools(mcp: FastMCP):
             - resumed: bool - Whether this is resuming an in-progress task
             - message: str - Status message
             - remaining_count: int - Number of remaining todo tasks
+            - prp: dict|null - Project Requirements Plan context (if available)
+              - content: str - The full PRP/specification text
+              - source_id: str - RAG source identifier
+              - url: str - Internal URL for the PRP
 
         Workflow:
             1. Check for existing "doing" tasks (resume incomplete work)
@@ -221,12 +253,16 @@ def register_harness_tools(mcp: FastMCP):
                         # Get remaining todo count
                         todo_count = await _get_todo_count(client, api_url, project_id)
 
+                        # Get PRP context for the project
+                        prp_context = await _get_prp_context(project_id)
+
                         return json.dumps({
                             "success": True,
                             "task": task,
                             "resumed": True,
                             "message": f"Resuming in-progress task: {task.get('title')}",
                             "remaining_count": todo_count,
+                            "prp": prp_context,
                         })
 
                 # No doing task, get next todo task
@@ -286,12 +322,16 @@ def register_harness_tools(mcp: FastMCP):
                         update_result = update_response.json()
                         next_task = update_result.get("task", next_task)
 
+                # Get PRP context for the project
+                prp_context = await _get_prp_context(project_id)
+
                 return json.dumps({
                     "success": True,
                     "task": next_task,
                     "resumed": False,
                     "message": f"Starting task: {next_task.get('title')}",
                     "remaining_count": len(todo_tasks) - 1,
+                    "prp": prp_context,
                 })
 
         except httpx.RequestError as e:
@@ -449,6 +489,38 @@ async def _get_todo_count(client: httpx.AsyncClient, api_url: str, project_id: s
     except Exception:
         pass
     return 0
+
+
+async def _get_prp_context(project_id: str) -> dict | None:
+    """
+    Get PRP (Project Requirements Plan) context for a project.
+
+    Retrieves the stored PRP from RAG to provide context for task implementation.
+
+    Args:
+        project_id: UUID of the project
+
+    Returns:
+        dict with PRP content and metadata, or None if not found
+    """
+    try:
+        from src.mcp_server.features.harness.prp_storage import retrieve_prp_for_project
+
+        result = await retrieve_prp_for_project(project_id)
+
+        if result.get("success"):
+            return {
+                "content": result.get("content", ""),
+                "source_id": result.get("source_id"),
+                "url": result.get("url"),
+            }
+        else:
+            logger.debug(f"No PRP found for project {project_id}: {result.get('error')}")
+            return None
+
+    except Exception as e:
+        logger.debug(f"Error retrieving PRP for project {project_id}: {e}")
+        return None
 
 
 async def _run_git_command(

@@ -1,5 +1,9 @@
 # Archon V2 - Harness Implementation Project
 
+> **NOTE:** This file is historical context from the initial harness implementation.
+> For current V2 development workflow, see **`docs/LEAD_ENGINEER.md`** instead.
+> The harness commands and MCP tools described below are now **implemented and working**.
+
 ## READ FIRST
 This file provides context for implementing Anthropic's harness architecture in Archon.
 
@@ -199,18 +203,18 @@ git add -A && git commit -m \message\ && git push myfork stable
 
 ---
 
-## Next Steps
+## Implementation Status (Completed)
 
-1. [ ] Create /harness-init slash command
-2. [ ] Create /harness-next slash command
-3. [ ] Create /harness-done slash command
-4. [ ] Create /harness-status slash command
-5. [ ] Test with sample project spec
-6. [ ] Test session handoff
-7. [ ] Document for users
-8. [ ] PR to Cole's repo
+1. [x] Create /harness-init slash command
+2. [x] Create /harness-next slash command
+3. [x] Create /harness-done slash command
+4. [x] Create /harness-status slash command
+5. [x] Implement harness MCP tools
+6. [x] Test with sample project spec
+7. [x] Test session handoff
+8. [ ] Document for users (in progress - see docs/)
+9. [ ] PR to Cole's repo
 
 ---
 
-*Last Updated: January 12, 2026*
-ENDOFFILE -inputFormat xml -outputFormat text
+*Last Updated: January 14, 2026*

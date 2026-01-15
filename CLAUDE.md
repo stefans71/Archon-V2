@@ -2,6 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## V2 Harness Workflow (START HERE)
+
+If you're working on Archon V2 development tasks, read **`docs/LEAD_ENGINEER.md`** first.
+
+### Quick Start
+```
+/harness-next    # Get next task and start working
+/harness-done    # Mark task complete
+/harness-status  # Check progress
+```
+
+### Harness MCP Tools
+- `harness_initialize(project_id, specification)` - Create tasks from spec
+- `harness_next_task(project_id)` - Get next task with smart selection
+- `harness_complete(task_id)` - Mark done + optional git commit
+
+### Key Documentation
+- `docs/LEAD_ENGINEER.md` - Your entry point (read first)
+- `docs/PROJECT_DIRECTOR.md` - Director's context
+- `docs/ROADMAP.md` - Feature roadmap
+- `docs/ARCHITECTURE_REFERENCE.md` - System overview
+
+---
+
 ## Beta Development Guidelines
 
 **Local-only deployment** - each user runs their own instance.
@@ -294,6 +320,12 @@ When connected to Claude/Cursor/Windsurf, the following tools are available:
 
 - `archon:find_versions` - Find version history or get specific version
 - `archon:manage_version` - Manage versions with actions: "create", "restore"
+
+### Harness Tools (V2)
+
+- `archon:harness_initialize` - Parse specification, create tasks automatically
+- `archon:harness_next_task` - Get next task with smart selection (checks "doing" first)
+- `archon:harness_complete` - Mark task done with optional git commit
 
 ## Important Notes
 
