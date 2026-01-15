@@ -219,6 +219,11 @@ def register_harness_tools(mcp: FastMCP):
               - files_modified: list - Files changed so far
               - next_action: str - What to do next
               - timestamp: str - When checkpoint was saved
+            - token_estimate: dict - Estimated token usage for the task
+              - estimated_tokens: int - Total estimated tokens
+              - warning: str|null - Warning if task is large
+              - risk_level: str - "low", "medium", "high", or "critical"
+              - breakdown: dict - Token breakdown by category
 
         Workflow:
             1. Check for existing "doing" tasks (resume incomplete work)
@@ -265,6 +270,9 @@ def register_harness_tools(mcp: FastMCP):
                         # Get checkpoint data for resumed task
                         checkpoint = await _get_checkpoint_for_task(task.get("id"))
 
+                        # Estimate task tokens
+                        token_estimate = _estimate_task_tokens(task)
+
                         return json.dumps({
                             "success": True,
                             "task": task,
@@ -273,6 +281,7 @@ def register_harness_tools(mcp: FastMCP):
                             "remaining_count": todo_count,
                             "prp": prp_context,
                             "checkpoint": checkpoint,
+                            "token_estimate": token_estimate,
                         })
 
                 # No doing task, get next todo task
@@ -335,6 +344,9 @@ def register_harness_tools(mcp: FastMCP):
                 # Get PRP context for the project
                 prp_context = await _get_prp_context(project_id)
 
+                # Estimate task tokens
+                token_estimate = _estimate_task_tokens(next_task)
+
                 return json.dumps({
                     "success": True,
                     "task": next_task,
@@ -343,6 +355,7 @@ def register_harness_tools(mcp: FastMCP):
                     "remaining_count": len(todo_tasks) - 1,
                     "prp": prp_context,
                     "checkpoint": None,
+                    "token_estimate": token_estimate,
                 })
 
         except httpx.RequestError as e:
@@ -1113,3 +1126,114 @@ async def _append_changelog_entry(
             "error": str(e),
             "file_path": str(changelog_path),
         }
+
+
+def _estimate_task_tokens(task: dict) -> dict:
+    """
+    Estimate the number of tokens a task will consume.
+
+    Uses heuristics based on task title and description to predict
+    token usage and warn about potential context compaction.
+
+    Args:
+        task: Task dictionary with title, description, etc.
+
+    Returns:
+        dict with:
+        - estimated_tokens: int - Estimated token count
+        - warning: str|null - Warning message if task is large
+        - breakdown: dict - Token breakdown by category
+        - risk_level: str - "low", "medium", or "high"
+    """
+    import re
+
+    title = task.get("title", "").lower()
+    description = task.get("description", "").lower()
+    full_text = f"{title} {description}"
+
+    # Base tokens for task overhead
+    base_tokens = 500
+
+    # Estimate based on description length (roughly 4 chars per token)
+    description_tokens = len(task.get("description", "")) // 4
+
+    # Keywords that suggest larger tasks
+    keyword_costs = {
+        "implement": 3000,
+        "create": 2500,
+        "refactor": 4000,
+        "test": 2500,
+        "add": 2000,
+        "update": 1500,
+        "fix": 1500,
+        "migrate": 3500,
+        "integrate": 3000,
+        "configure": 1500,
+        "setup": 2000,
+        "design": 1000,
+        "document": 1000,
+    }
+
+    keyword_tokens = 0
+    matched_keywords = []
+    for keyword, cost in keyword_costs.items():
+        if keyword in title:
+            keyword_tokens += cost
+            matched_keywords.append(keyword)
+
+    # File-related estimates
+    file_patterns = [
+        r"files?\s+to\s+(create|modify|update)",
+        r"create\s+.*\.py",
+        r"modify\s+.*\.py",
+        r"update\s+.*\.ts",
+    ]
+    files_mentioned = 0
+    for pattern in file_patterns:
+        files_mentioned += len(re.findall(pattern, full_text))
+
+    file_tokens = files_mentioned * 1500
+
+    # Check for multi-step indicators
+    step_indicators = re.findall(r"^\s*\d+\.|^-\s|\[\s*\]", description, re.MULTILINE)
+    step_tokens = len(step_indicators) * 500
+
+    # Total estimate
+    total_tokens = base_tokens + description_tokens + keyword_tokens + file_tokens + step_tokens
+
+    # Determine risk level and warning
+    SAFE_THRESHOLD = 8000
+    WARNING_THRESHOLD = 15000
+    CRITICAL_THRESHOLD = 25000
+
+    if total_tokens < SAFE_THRESHOLD:
+        risk_level = "low"
+        warning = None
+    elif total_tokens < WARNING_THRESHOLD:
+        risk_level = "medium"
+        warning = f"Task may be moderately large (~{total_tokens:,} tokens). Consider saving checkpoints."
+    elif total_tokens < CRITICAL_THRESHOLD:
+        risk_level = "high"
+        warning = f"Large task (~{total_tokens:,} tokens). High risk of context compaction. Consider breaking into smaller tasks."
+    else:
+        risk_level = "critical"
+        warning = f"Very large task (~{total_tokens:,} tokens). Strongly recommend splitting into smaller sub-tasks."
+
+    return {
+        "estimated_tokens": total_tokens,
+        "warning": warning,
+        "risk_level": risk_level,
+        "breakdown": {
+            "base": base_tokens,
+            "description": description_tokens,
+            "keywords": keyword_tokens,
+            "files": file_tokens,
+            "steps": step_tokens,
+        },
+        "matched_keywords": matched_keywords,
+        "thresholds": {
+            "safe": SAFE_THRESHOLD,
+            "warning": WARNING_THRESHOLD,
+            "critical": CRITICAL_THRESHOLD,
+        },
+    }

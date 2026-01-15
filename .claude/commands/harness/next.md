@@ -1,3 +1,10 @@
+---
+name: harness-next
+description: |
+  Get the next task and start working on it.
+  Checks for in-progress tasks first, then gets highest priority todo.
+---
+
 # Harness Next Task
 
 Get the next task and start working on it.
@@ -73,6 +80,12 @@ The `harness_next_task` tool returns:
     "files_modified": ["src/foo.py", "tests/test_foo.py"],
     "next_action": "Add error handling to parse function",
     "timestamp": "2026-01-14T06:30:00Z"
+  },
+  "token_estimate": {
+    "estimated_tokens": 5500,
+    "warning": null,
+    "risk_level": "low",
+    "breakdown": { "base": 500, "description": 250, "keywords": 2000 }
   }
 }
 ```
@@ -87,6 +100,11 @@ The `harness_next_task` tool returns:
   - Use this to continue where you left off
   - Shows files already modified and next action to take
   - Save new checkpoints with `/harness-checkpoint` or the MCP tool
+- `token_estimate` provides estimated context usage:
+  - `estimated_tokens` - Predicted token consumption
+  - `risk_level` - "low", "medium", "high", or "critical"
+  - `warning` - Present if task may cause context compaction
+  - If `risk_level` is high/critical, consider using checkpoints or splitting the task
 
 ## Key Files Reference
 
