@@ -28,6 +28,7 @@ class GitConfig:
     remote_host: str | None
     remote_user: str | None
     remote_path: str | None
+    local_repo_path: str | None  # For local mode: path to repo in container
 
     @classmethod
     def from_env(cls) -> "GitConfig":
@@ -69,6 +70,7 @@ class GitConfig:
         remote_host = os.getenv("GIT_REMOTE_HOST")
         remote_user = os.getenv("GIT_REMOTE_USER")
         remote_path = os.getenv("GIT_REMOTE_PATH")
+        local_repo_path = os.getenv("GIT_REPO_PATH")
 
         if mode == GitExecutionMode.REMOTE:
             missing = []
@@ -91,6 +93,7 @@ class GitConfig:
             remote_host=remote_host,
             remote_user=remote_user,
             remote_path=remote_path,
+            local_repo_path=local_repo_path,
         )
 
     @property

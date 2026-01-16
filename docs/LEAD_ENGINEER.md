@@ -213,14 +213,19 @@ Services run on home server. You can't restart them directly, but you can:
 
 ### MCP Session Invalid After Server Restart
 
-**Symptom:** "No valid session ID provided" errors, MCP tool calls failing
+**Symptom:** "No valid session ID provided" errors, MCP tool calls failing, `/mcp` shows "archon · ✘ failed"
 
 **Cause:** When MCP server restarts (`docker compose restart archon-mcp`), sessions are invalidated.
 
-**Fix:**
-1. Exit Claude Code (`exit` or Ctrl+C)
-2. Start new session (`claude` or `ssh do-a2`)
-3. Use `/resume` to restore conversation if needed
+**Fix:** From laptop terminal:
+```bash
+# Exit current session first (Ctrl+C or 'exit')
+# Then reconnect:
+ssh do-a2
+```
+This runs `~/start-archon.sh` which handles the SSH-over-Tailscale tunnel, SSHFS mount, and launches Claude automatically.
+
+Use `/resume` to restore conversation context if needed.
 
 ### Git Operations Slow/Timing Out
 

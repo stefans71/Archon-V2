@@ -9,21 +9,36 @@
 
 **Working Directory:** `/root/archon-remote/` (NOT `/root/`)
 
-**Immediately after reading this file, run these MCP calls:**
+**To start/restart a session:** From laptop terminal run `ssh do-a2`
+- This handles tunnel, SSHFS mount, and launches Claude automatically
+- See `docs/SETUP.md` for troubleshooting if MCP fails
 
+### Step 1: Read These Files (in order)
+```
+1. This file (PROJECT_DIRECTOR.md) - you're reading it
+2. docs/ROADMAP.md - current phase details and feature list
+3. Known Issues section below - critical learnings
+```
+
+### Step 2: Check Task Status
 ```python
-# 1. Check if any task is in progress
+# Check if any task is in progress
 find_tasks(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", filter_by="status", filter_value="doing")
 
-# 2. Check todo queue
+# Check todo queue
 find_tasks(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", filter_by="status", filter_value="todo")
 ```
 
-**Then report to user:**
+### Step 3: Report to User
 - Current phase and status
 - Any task in "doing" (Engineer may be working on it)
 - Next task in queue
 - Await instructions
+
+### Reference When Needed
+- `docs/SETUP.md` - Troubleshooting SSH, MCP, SSHFS issues
+- `CONTRIBUTING.md` - Slash command YAML format (see Known Issues below)
+- `docs/LEAD_ENGINEER.md` - What DO-a2 sees (different from this file)
 
 ---
 
@@ -50,9 +65,9 @@ I do NOT write implementation code directly. I create tasks and the Lead Enginee
 - **Purpose:** Internal dogfooding - using Archon to build Archon
 
 ### Development Phase
-- **Current Phase:** Phase 2 - Context Persistence
-- **Status:** 3/4 tasks complete
-- **Focus:** Surviving autocompact, checkpoints, changelog automation
+- **Current Phase:** Phase 3 - Project Lifecycle
+- **Status:** Starting (Phase 2 complete!)
+- **Focus:** Project wizard, phase management commands
 
 ---
 
@@ -99,13 +114,13 @@ I do NOT write implementation code directly. I create tasks and the Lead Enginee
 - [x] Define git commit structure
 - [x] Document MCP reconnection requirement
 
-### Phase 2: Context Persistence (ACTIVE)
+### Phase 2: Context Persistence ✅ COMPLETE
 | Task | ID | Priority | Status |
 |------|-----|----------|--------|
 | Store PRP in RAG on project creation | `12e2013d-cef6-4dfd-bb0a-301778195d55` | 100 | ✅ |
 | Implement checkpoint system | `15bc3615-509f-418e-bd24-d02e593833e5` | 200 | ✅ |
 | Add timestamps to CHANGELOG on /harness-done | `1852208f-de3a-452e-816b-cc6310fe64f0` | 300 | ✅ |
-| Token estimation for task sizing | `4364c503-4471-42b2-bbe5-1abe553c792e` | 400 | ⬜ |
+| Token estimation for task sizing | `4364c503-4471-42b2-bbe5-1abe553c792e` | 400 | ✅ |
 
 ### Phase 3: Project Lifecycle
 | Task | ID | Priority |
@@ -211,6 +226,24 @@ Use `"Phase N: Name"` format for the feature field:
 3. Update `docs/ROADMAP.md` - check off the item
 4. Update timestamp at bottom of PROJECT_DIRECTOR.md
 
+### If Creating Slash Commands
+
+**CRITICAL:** All `.claude/commands/*.md` files MUST have YAML frontmatter:
+```yaml
+---
+name: command-name
+description: |
+  What this command does.
+  Can be multi-line.
+argument-hint: <optional args>
+---
+
+# Command Title
+Content here...
+```
+
+Without frontmatter, Claude Code won't recognize the command (shows "Unknown skill").
+
 ---
 
 ## Files I Maintain
@@ -238,6 +271,51 @@ Use `"Phase N: Name"` format for the feature field:
 ### What Ships vs What Doesn't
 - **Ships:** Code, commands, docs, empty database schema
 - **Doesn't ship:** Our project/task data, VPS setup, meta workflow
+
+---
+
+## Known Issues & Learnings
+
+> **IMPORTANT:** This section captures critical discoveries. Read on every session start.
+
+### Slash Command Format (Jan 15, 2026)
+**Issue:** Commands in `.claude/commands/` weren't being recognized by Claude Code.
+**Root Cause:** Missing YAML frontmatter. Commands were created without the required format.
+**Fix:** All command files MUST start with:
+```yaml
+---
+name: command-name
+description: |
+  What it does
+---
+```
+**Prevention:** See CONTRIBUTING.md "Claude Code Slash Commands" section.
+
+### Session Reconnection (Jan 15, 2026)
+**Issue:** After MCP server restart, Claude Code shows "archon · ✘ failed".
+**Fix:** From laptop terminal, run `ssh do-a2` (NOT manual exit/cd/claude).
+**Details:** See SETUP.md "MCP session invalid after server restart" section.
+
+### Git Remote (Jan 15, 2026)
+**Fork URL:** `git@github.com:stefans71/Archon-V2.git` (NOT coleam00/archon)
+**Fix if wrong:** `git remote set-url origin git@github.com:stefans71/Archon-V2.git`
+
+### Slash Commands Not Discovered (Jan 15, 2026)
+**Issue:** Custom commands in `.claude/commands/` not showing in autocomplete.
+**Naming format:** Use `/folder:filename` (e.g., `/harness:next`), NOT `/folder-filename`
+**Status:** UNRESOLVED - commands have correct frontmatter but Claude Code v2.1.7 isn't discovering them.
+**Workaround:** Call MCP tools directly:
+```python
+harness_next_task(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", mark_as_doing=True)
+harness_complete(task_id="...", auto_commit=False)
+```
+**Investigation needed:** Why command discovery fails after MCP restart. May need Phase 3 task.
+
+### Files I Should Also Check
+When investigating issues, reference:
+- `CONTRIBUTING.md` - Has slash command format requirements
+- `SETUP.md` - Has troubleshooting steps
+- `LEAD_ENGINEER.md` - Has common issues for DO-a2
 
 ---
 

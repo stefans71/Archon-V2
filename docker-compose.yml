@@ -89,6 +89,14 @@ services:
       - ARCHON_MCP_PORT=${ARCHON_MCP_PORT:-8051}
       - ARCHON_SERVER_PORT=${ARCHON_SERVER_PORT:-8181}
       - ARCHON_AGENTS_PORT=${ARCHON_AGENTS_PORT:-8052}
+      # Git configuration for harness auto-commit
+      - GIT_EXECUTION_MODE=${GIT_EXECUTION_MODE:-local}
+      - GIT_REPO_PATH=/repo
+      - GIT_OPERATION_TIMEOUT=${GIT_OPERATION_TIMEOUT:-60}
+      - GIT_AUTHOR_NAME=${GIT_AUTHOR_NAME:-Archon Harness}
+      - GIT_AUTHOR_EMAIL=${GIT_AUTHOR_EMAIL:-archon@local}
+      - GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-Archon Harness}
+      - GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-archon@local}
     networks:
       - app-network
       - supabase_default
@@ -97,7 +105,7 @@ services:
         condition: service_healthy
     volumes:
       - ./python/src:/app/src
-      
+      - ./:/repo  # Full repo mount for git operations
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

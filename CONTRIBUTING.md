@@ -569,6 +569,63 @@ class YourService:
 - Provide specific, actionable feedback
 - Acknowledge good practices and improvements
 
+## 🤖 Claude Code Slash Commands
+
+Slash commands in `.claude/commands/` allow Claude Code users to invoke custom workflows.
+
+### Required Format
+
+**CRITICAL:** All command files MUST have YAML frontmatter or Claude Code won't recognize them:
+
+```markdown
+---
+name: command-name
+description: |
+  Brief description of what this command does.
+  Can be multi-line.
+argument-hint: <optional argument description>
+---
+
+# Command Title
+
+Your command content here...
+```
+
+### Command File Location
+
+```
+.claude/commands/
+├── category/
+│   ├── category-command.md    → /category-command
+│   └── another-command.md     → /another-command
+```
+
+### Common Mistakes
+
+❌ **Missing frontmatter** - Command won't be discovered:
+```markdown
+# My Command
+This command does something...
+```
+
+✅ **Correct format** - Command will work:
+```markdown
+---
+name: my-command
+description: Does something useful
+---
+
+# My Command
+This command does something...
+```
+
+### Testing Commands
+
+After adding or modifying commands, restart Claude Code and verify:
+1. Run `/help` to see if your command appears
+2. Try tab-completion with `/your-` to see suggestions
+3. Run the full command `/your-command`
+
 ## 📞 Getting Help
 
 - **GitHub Issues**: For bugs, feature requests, and questions

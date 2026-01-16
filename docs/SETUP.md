@@ -2,8 +2,8 @@
 
 ## Architecture Overview
 ```
-┌──────────────────────┐       SSH Tunnel        ┌─────────────────────────┐
-│   Digital Ocean      │◄──────(Tailscale)──────►│   China Home Server     │
+┌──────────────────────┐    SSH-over-Tailscale   ┌─────────────────────────┐
+│   Digital Ocean      │◄───────────────────────►│   China Home Server     │
 │   (droplet1)         │                         │   (SFF-Workstation)     │
 │                      │                         │                         │
 │   Claude Code CLI    │       Port 8051         │   Archon Stack          │
@@ -15,6 +15,11 @@
                                                  │                         │
                                                  │   Source: ~/archon      │
                                                  └─────────────────────────┘
+
+Connection: SSH tunnel over Tailscale mesh network
+- Tailscale provides secure connectivity between DO VPS and home server
+- SSH tunnel forwards port 8051 for MCP access
+- SSHFS mounts ~/archon from home server to ~/archon-remote on DO VPS
 ```
 
 **Why this setup:** Anthropic API is geo-blocked in China. DO bypasses this.
@@ -121,13 +126,24 @@ claude mcp add --transport http archon http://localhost:8051/mcp
 When the MCP server restarts (e.g., `docker compose restart archon-mcp`), Claude Code sessions become invalid. You'll see:
 - "No valid session ID provided" errors
 - MCP tool calls failing
+- `/mcp` shows "archon · ✘ failed"
 
-**Fix:** Restart Claude Code:
-1. Exit current session (`exit` or Ctrl+C)
-2. Start new session (`claude` or `ssh do-a2`)
-3. Use `/resume` to restore conversation context if needed
+**Fix:** From your laptop, reconnect with `ssh do-a2`:
+```bash
+# Exit current DO-a2 session first (Ctrl+C or type 'exit')
+# Then from laptop terminal:
+ssh do-a2
+```
 
-**Why this happens:** MCP uses session IDs for request tracking. When the server restarts, existing sessions are invalidated. Claude Code needs to establish a new session.
+This runs `~/start-archon.sh` which automatically:
+1. Checks/starts the SSH-over-Tailscale tunnel (port 8051)
+2. Checks/mounts SSHFS to ~/archon-remote
+3. cd to ~/archon-remote
+4. Launches Claude Code
+
+After reconnecting, use `/resume` to restore conversation context if needed.
+
+**Why this happens:** MCP uses session IDs for request tracking. When the server restarts, existing sessions are invalidated.
 
 ## Git
 

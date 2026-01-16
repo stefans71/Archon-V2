@@ -2,6 +2,7 @@
 Harness tools for Archon MCP Server.
 
 This module provides tools for task automation workflows:
+- project_initialize: Create project with PRP stored in RAG
 - harness_initialize: Parse specs and create tasks automatically
 - harness_next_task: Get next todo task with smart selection
 - harness_complete: Mark task done and optionally commit to git
@@ -26,6 +27,215 @@ logger = logging.getLogger(__name__)
 
 def register_harness_tools(mcp: FastMCP):
     """Register all harness tools with the MCP server."""
+
+    @mcp.tool()
+    async def project_initialize(
+        ctx: Context,
+        title: str,
+        description: str,
+        prp: str,
+        scope: str = "medium",
+        github_repo: str | None = None,
+        create_initial_tasks: bool = False,
+        task_assignee: str = "AI IDE Agent",
+    ) -> str:
+        """
+        Create a new project with a Project Requirements Plan (PRP) stored in RAG.
+
+        This is the primary tool for the /project-new wizard. It combines:
+        1. Project creation in Archon
+        2. PRP storage in RAG (survives context compaction)
+        3. Optionally creating initial tasks from the PRP
+
+        Args:
+            title: Project title (e.g., "User Authentication System")
+            description: Brief project description for the project list
+            prp: The full Project Requirements Plan in markdown format.
+                 This is stored in RAG and used for context during task work.
+            scope: Project scope - "small", "medium", "large", or "epic"
+            github_repo: Optional GitHub repository URL
+            create_initial_tasks: If True, parses the PRP and creates initial tasks
+            task_assignee: Default assignee for created tasks (default: "AI IDE Agent")
+
+        Returns:
+            JSON with structure:
+            - success: bool - Whether project creation succeeded
+            - project: dict - The created project details
+              - id: str - Project UUID (use this for harness_next_task)
+              - title: str - Project title
+              - description: str - Project description
+            - prp_stored: bool - Whether PRP was stored in RAG
+            - prp_source_id: str|null - RAG source ID for the PRP
+            - tasks_created: int - Number of tasks created (if create_initial_tasks=True)
+            - error: str|null - Error message if failed
+
+        Example PRP format:
+            ```markdown
+            # Project: User Auth
+
+            ## Goals
+            - Implement JWT authentication
+            - Add OAuth support
+
+            ## Requirements
+            - Login/logout endpoints
+            - Token refresh mechanism
+
+            ## Tech Stack
+            - Python/FastAPI
+            - PostgreSQL
+
+            ## Scope
+            - Size: Medium
+            - Type: New Feature
+            ```
+
+        Usage:
+            project_initialize(
+                title="User Auth System",
+                description="JWT-based authentication with OAuth",
+                prp="# Project: User Auth\\n\\n## Goals\\n...",
+                scope="medium",
+                create_initial_tasks=True
+            )
+        """
+        try:
+            if not title or not title.strip():
+                return MCPErrorFormatter.format_error(
+                    error_type="validation_error",
+                    message="title is required",
+                    suggestion="Provide a project title",
+                )
+
+            if not prp or not prp.strip():
+                return MCPErrorFormatter.format_error(
+                    error_type="validation_error",
+                    message="prp is required",
+                    suggestion="Provide a Project Requirements Plan document",
+                )
+
+            # Validate scope
+            valid_scopes = ["small", "medium", "large", "epic"]
+            if scope.lower() not in valid_scopes:
+                scope = "medium"
+            else:
+                scope = scope.lower()
+
+            api_url = get_api_url()
+            timeout = get_default_timeout()
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # Step 1: Create the project
+                project_data = {
+                    "title": title.strip(),
+                    "description": description.strip() if description else "",
+                }
+
+                if github_repo:
+                    project_data["github_repo"] = github_repo
+
+                # Store scope in project metadata/features
+                project_data["features"] = {
+                    "scope": scope,
+                    "has_prp": True,
+                }
+
+                response = await client.post(
+                    urljoin(api_url, "/api/projects"),
+                    json=project_data,
+                )
+
+                if response.status_code != 200:
+                    return MCPErrorFormatter.from_http_error(response, "create project")
+
+                result = response.json()
+                project = result.get("project", {})
+                project_id = project.get("id")
+
+                if not project_id:
+                    return MCPErrorFormatter.format_error(
+                        error_type="server_error",
+                        message="Project created but no ID returned",
+                        suggestion="Check server logs for details",
+                    )
+
+                logger.info(f"Created project {project_id}: {title}")
+
+            # Step 2: Store PRP in RAG
+            prp_result = None
+            try:
+                from src.mcp_server.features.harness.prp_storage import store_prp_in_rag
+
+                prp_result = await store_prp_in_rag(
+                    project_id=project_id,
+                    project_title=title,
+                    specification=prp,
+                )
+                if prp_result.get("success"):
+                    logger.info(f"PRP stored in RAG for project {project_id}")
+                else:
+                    logger.warning(f"Failed to store PRP in RAG: {prp_result.get('error')}")
+            except Exception as prp_error:
+                logger.warning(f"Error storing PRP in RAG (non-fatal): {prp_error}")
+                prp_result = {"success": False, "error": str(prp_error)}
+
+            # Step 3: Optionally create initial tasks
+            tasks_created = 0
+            created_tasks = []
+            if create_initial_tasks:
+                task_items = _parse_specification(prp)
+                if task_items:
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        for idx, item in enumerate(task_items):
+                            task_data = {
+                                "project_id": project_id,
+                                "title": item["title"],
+                                "description": item.get("description", ""),
+                                "assignee": task_assignee,
+                                "task_order": (idx + 1) * 100,
+                                "sources": [],
+                                "code_examples": [],
+                            }
+
+                            task_response = await client.post(
+                                urljoin(api_url, "/api/tasks"),
+                                json=task_data,
+                            )
+
+                            if task_response.status_code == 200:
+                                task_result = task_response.json()
+                                task = task_result.get("task", {})
+                                created_tasks.append({
+                                    "id": task.get("id"),
+                                    "title": task.get("title"),
+                                })
+                                tasks_created += 1
+
+            return json.dumps({
+                "success": True,
+                "project": {
+                    "id": project_id,
+                    "title": project.get("title"),
+                    "description": project.get("description"),
+                },
+                "prp_stored": prp_result.get("success") if prp_result else False,
+                "prp_source_id": prp_result.get("source_id") if prp_result else None,
+                "tasks_created": tasks_created,
+                "tasks": created_tasks if created_tasks else None,
+                "message": f"Project '{title}' created successfully",
+                "next_steps": [
+                    f"Use harness_next_task(project_id='{project_id}') to get tasks",
+                    f"Use harness_initialize(project_id='{project_id}', specification='...') to add more tasks",
+                ],
+            })
+
+        except httpx.RequestError as e:
+            return MCPErrorFormatter.from_exception(
+                e, "initialize project", {"title": title}
+            )
+        except Exception as e:
+            logger.error(f"Error initializing project: {e}", exc_info=True)
+            return MCPErrorFormatter.from_exception(e, "initialize project")
 
     @mcp.tool()
     async def harness_initialize(
@@ -548,7 +758,7 @@ def register_harness_tools(mcp: FastMCP):
             logger.error(f"Error managing checkpoint: {e}", exc_info=True)
             return MCPErrorFormatter.from_exception(e, "manage checkpoint")
 
-    logger.info("Harness tools registered")
+    logger.info("Harness tools registered (project_initialize, harness_initialize, harness_next_task, harness_complete, harness_checkpoint)")
 
 
 def _parse_specification(specification: str) -> list[dict]:
@@ -759,6 +969,7 @@ async def _perform_git_commit(
             return await _run_git_command(
                 ["git"] + args,
                 config.timeout_seconds,
+                cwd=config.local_repo_path,  # Use configured repo path
             )
 
     try:
