@@ -7,6 +7,7 @@ versioning, progress tracking, source linking, and AI-assisted project creation.
 """
 
 from .document_service import DocumentService
+from .phase_service import PhaseService
 from .project_creation_service import ProjectCreationService
 from .project_service import ProjectService
 from .source_linking_service import SourceLinkingService
@@ -16,6 +17,7 @@ from .versioning_service import VersioningService
 __all__ = [
     "ProjectService",
     "TaskService",
+    "PhaseService",
     "DocumentService",
     "VersioningService",
     "ProjectCreationService",

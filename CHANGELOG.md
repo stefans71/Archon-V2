@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+#### Phase 3: Project Lifecycle (January 16, 2026)
+- **Phase Management System**
+  - Database migration: `001_add_phases_table.sql` (archon_phases table, phase_id on tasks)
+  - Phase MCP tools: `find_phases`, `manage_phase`, `assign_task_phase`, `phase_plan_context`
+  - Phase service layer: `phase_service.py` with full CRUD + activate/complete operations
+  - API endpoints for phase management (9 endpoints)
+- **Phase Commands**
+  - `/phase-plan` - Plan next phase from PRP + CHANGELOG context
+  - `/phase-done` - Complete phase and update CHANGELOG
+- **Project Wizard**
+  - `/project-new` - Interactive wizard for project creation with PRP generation
+
+#### Phase 2: Context Persistence (January 14-15, 2026)
+- **PRP Storage** - Project Requirements Plans stored in RAG (survives context compaction)
+- **Checkpoint System** - Save/restore task progress mid-execution
+- **Token Estimation** - Risk assessment for task sizing
+
+#### Phase 1: Stability (January 12-13, 2026)
 - **Harness System** - Task automation workflow for AI-driven development
   - `/harness-init` - Initialize project from specification
   - `/harness-next` - Get and start next task

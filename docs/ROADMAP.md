@@ -353,25 +353,34 @@ Claude (in harness) ──► CONTAINED to work on user's project
 - [x] Add timestamps to CHANGELOG on /harness-done
 - [x] Token estimation for task sizing
 
-### Phase 3: Project Lifecycle (ACTIVE)
-- [ ] Create /project-new wizard
-- [ ] Add phases table to database schema
-- [ ] Create /phase-plan command
-- [ ] Create /phase-done command (appends to CHANGELOG)
+### Phase 3: Project Lifecycle ✅ COMPLETE
+- [x] Create /project-new wizard (interactive project setup)
+- [x] Add phases table to database schema (migration: 001_add_phases_table.sql)
+- [x] Create /phase-plan command (reads PRP + CHANGELOG, creates phase tasks)
+- [x] Create /phase-done command (completes phase, appends to CHANGELOG)
+- [x] Add phase MCP tools (find_phases, manage_phase, assign_task_phase, phase_plan_context)
+- [x] Add phase_service.py for business logic
+- [x] Update task_service to support phase_id
 
 **Decision:** Phase summaries append to CHANGELOG.md (single source of truth, not separate handoff files).
 
-### Phase 4: Intelligence
-- [ ] Smarter task decomposition
-- [ ] TDD mode
+### Phase 4: Intelligence (NEXT)
+- [ ] Auto-continue mode (loop without user prompts between tasks)
+- [ ] Test verification before marking task done
+- [ ] Smarter task decomposition from PRP
+- [ ] TDD mode option
 - [ ] Task dependency tracking
-- [ ] Auto-split large tasks
+- [ ] Auto-split large tasks (token estimation)
 
 ### Phase 5: Automation
 - [ ] Auto-continue mode (no user prompts)
 - [ ] Scheduled runs
 - [ ] Progress notifications
 - [ ] Multi-project support
+- [ ] RAG-based codebase index (reduce session onboarding tokens)
+  - Generate codebase manifest (file paths, key symbols, summaries) on home server
+  - Store in Archon's RAG system for instant context retrieval
+  - New sessions query "what files handle X" without expensive Glob operations
 
 ### Phase 6: Collaboration
 - [ ] Multiple agents on same project

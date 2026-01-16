@@ -61,6 +61,7 @@ class TaskService:
         task_order: int = 0,
         priority: str = "medium",
         feature: str | None = None,
+        phase_id: str | None = None,
         sources: list[dict[str, Any]] = None,
         code_examples: list[dict[str, Any]] = None,
     ) -> tuple[bool, dict[str, Any]]:
@@ -130,6 +131,9 @@ class TaskService:
             if feature:
                 task_data["feature"] = feature
 
+            if phase_id:
+                task_data["phase_id"] = phase_id
+
             response = self.supabase_client.table("archon_tasks").insert(task_data).execute()
 
             if response.data:
@@ -146,6 +150,8 @@ class TaskService:
                         "assignee": task["assignee"],
                         "task_order": task["task_order"],
                         "priority": task["priority"],
+                        "feature": task.get("feature"),
+                        "phase_id": task.get("phase_id"),
                         "created_at": task["created_at"],
                     }
                 }
@@ -299,6 +305,7 @@ class TaskService:
                     "task_order": task.get("task_order", 0),
                     "priority": task.get("priority", "medium"),
                     "feature": task.get("feature"),
+                    "phase_id": task.get("phase_id"),
                     "created_at": task["created_at"],
                     "updated_at": task["updated_at"],
                     "archived": task.get("archived", False),
@@ -401,6 +408,10 @@ class TaskService:
 
             if "feature" in update_fields:
                 update_data["feature"] = update_fields["feature"]
+
+            # Support phase_id (can be set to null to remove from phase)
+            if "phase_id" in update_fields:
+                update_data["phase_id"] = update_fields["phase_id"]
 
             # Update task
             response = (

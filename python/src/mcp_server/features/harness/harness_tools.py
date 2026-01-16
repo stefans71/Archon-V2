@@ -424,6 +424,13 @@ def register_harness_tools(mcp: FastMCP):
               - content: str - The full PRP/specification text
               - source_id: str - RAG source identifier
               - url: str - Internal URL for the PRP
+            - phase: dict|null - Current phase context (if task is in a phase)
+              - id: str - Phase UUID
+              - phase_number: int - Phase sequence number
+              - title: str - Phase title
+              - description: str - Phase description
+              - status: str - Phase status (planning, active, complete)
+              - goals: list - Phase goals
             - checkpoint: dict|null - Saved progress for resumed tasks
               - step: int - Current step number
               - files_modified: list - Files changed so far
@@ -480,6 +487,9 @@ def register_harness_tools(mcp: FastMCP):
                         # Get checkpoint data for resumed task
                         checkpoint = await _get_checkpoint_for_task(task.get("id"))
 
+                        # Get phase context if task is in a phase
+                        phase_context = await _get_phase_context(project_id, task.get("phase_id"))
+
                         # Estimate task tokens
                         token_estimate = _estimate_task_tokens(task)
 
@@ -490,6 +500,7 @@ def register_harness_tools(mcp: FastMCP):
                             "message": f"Resuming in-progress task: {task.get('title')}",
                             "remaining_count": todo_count,
                             "prp": prp_context,
+                            "phase": phase_context,
                             "checkpoint": checkpoint,
                             "token_estimate": token_estimate,
                         })
@@ -554,6 +565,9 @@ def register_harness_tools(mcp: FastMCP):
                 # Get PRP context for the project
                 prp_context = await _get_prp_context(project_id)
 
+                # Get phase context if task is in a phase
+                phase_context = await _get_phase_context(project_id, next_task.get("phase_id"))
+
                 # Estimate task tokens
                 token_estimate = _estimate_task_tokens(next_task)
 
@@ -564,6 +578,7 @@ def register_harness_tools(mcp: FastMCP):
                     "message": f"Starting task: {next_task.get('title')}",
                     "remaining_count": len(todo_tasks) - 1,
                     "prp": prp_context,
+                    "phase": phase_context,
                     "checkpoint": None,
                     "token_estimate": token_estimate,
                 })
@@ -758,7 +773,149 @@ def register_harness_tools(mcp: FastMCP):
             logger.error(f"Error managing checkpoint: {e}", exc_info=True)
             return MCPErrorFormatter.from_exception(e, "manage checkpoint")
 
-    logger.info("Harness tools registered (project_initialize, harness_initialize, harness_next_task, harness_complete, harness_checkpoint)")
+    @mcp.tool()
+    async def phase_plan_context(
+        ctx: Context,
+        project_id: str,
+    ) -> str:
+        """
+        Gather context for phase planning.
+
+        This tool retrieves all the information needed to plan a new phase:
+        - Project Requirements Plan (PRP) from RAG
+        - CHANGELOG history (what's been done)
+        - Existing phases and their status
+        - Task summary by status
+
+        Use this before creating a new phase with manage_phase and manage_task.
+
+        Args:
+            project_id: UUID of the project to plan for
+
+        Returns:
+            JSON with structure:
+            - success: bool - Whether context was gathered
+            - project: dict - Project details (title, description)
+            - prp: dict|null - Project Requirements Plan
+              - content: str - Full PRP text
+              - source_id: str - RAG source identifier
+            - changelog: dict - CHANGELOG content and recent entries
+              - content: str - Full CHANGELOG text (truncated if long)
+              - recent_entries: list - Recent entries from [Unreleased]
+            - phases: list - Existing phases with status
+            - task_summary: dict - Task counts by status
+            - recommendation: str - Suggested next phase based on analysis
+
+        Example workflow:
+            1. Call phase_plan_context(project_id="...")
+            2. Review PRP and CHANGELOG to understand project state
+            3. Determine next logical phase
+            4. Create phase with manage_phase("create", ...)
+            5. Create tasks with manage_task("create", ...)
+        """
+        try:
+            if not project_id:
+                return MCPErrorFormatter.format_error(
+                    error_type="validation_error",
+                    message="project_id is required",
+                    suggestion="Provide a valid project UUID",
+                )
+
+            api_url = get_api_url()
+            timeout = get_default_timeout()
+
+            result: dict = {
+                "success": True,
+                "project": None,
+                "prp": None,
+                "changelog": None,
+                "phases": [],
+                "task_summary": {},
+                "recommendation": None,
+            }
+
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # Get project details
+                project_response = await client.get(
+                    urljoin(api_url, f"/api/projects/{project_id}")
+                )
+
+                if project_response.status_code == 404:
+                    return MCPErrorFormatter.format_error(
+                        error_type="not_found",
+                        message=f"Project {project_id} not found",
+                        suggestion="Verify the project_id is correct",
+                        http_status=404,
+                    )
+                elif project_response.status_code == 200:
+                    project_data = project_response.json()
+                    result["project"] = {
+                        "id": project_data.get("id"),
+                        "title": project_data.get("title"),
+                        "description": project_data.get("description"),
+                    }
+
+                # Get PRP from RAG
+                prp_context = await _get_prp_context(project_id)
+                if prp_context:
+                    result["prp"] = prp_context
+
+                # Get existing phases
+                phases_response = await client.get(
+                    urljoin(api_url, f"/api/projects/{project_id}/phases"),
+                    params={"per_page": 100},
+                )
+                if phases_response.status_code == 200:
+                    phases_data = phases_response.json()
+                    phases = phases_data.get("phases", [])
+                    result["phases"] = [
+                        {
+                            "id": p.get("id"),
+                            "phase_number": p.get("phase_number"),
+                            "title": p.get("title"),
+                            "status": p.get("status"),
+                            "summary": p.get("summary"),
+                        }
+                        for p in phases
+                    ]
+
+                # Get task summary
+                task_counts = {"todo": 0, "doing": 0, "review": 0, "done": 0}
+                for status in task_counts.keys():
+                    status_response = await client.get(
+                        urljoin(api_url, "/api/tasks"),
+                        params={
+                            "project_id": project_id,
+                            "status": status,
+                            "per_page": 1,
+                            "include_closed": True,
+                        },
+                    )
+                    if status_response.status_code == 200:
+                        status_data = status_response.json()
+                        task_counts[status] = status_data.get("total_count", 0)
+
+                result["task_summary"] = task_counts
+
+            # Read CHANGELOG
+            changelog_result = await _read_changelog_for_context()
+            if changelog_result.get("success"):
+                result["changelog"] = changelog_result
+
+            # Generate recommendation
+            result["recommendation"] = _generate_phase_recommendation(result)
+
+            return json.dumps(result)
+
+        except httpx.RequestError as e:
+            return MCPErrorFormatter.from_exception(
+                e, "get phase plan context", {"project_id": project_id}
+            )
+        except Exception as e:
+            logger.error(f"Error getting phase plan context: {e}", exc_info=True)
+            return MCPErrorFormatter.from_exception(e, "get phase plan context")
+
+    logger.info("Harness tools registered (project_initialize, harness_initialize, harness_next_task, harness_complete, harness_checkpoint, phase_plan_context)")
 
 
 def _parse_specification(specification: str) -> list[dict]:
@@ -851,6 +1008,87 @@ async def _get_prp_context(project_id: str) -> dict | None:
 
     except Exception as e:
         logger.debug(f"Error retrieving PRP for project {project_id}: {e}")
+        return None
+
+
+async def _get_phase_context(project_id: str, phase_id: str | None) -> dict | None:
+    """
+    Get phase context for a task.
+
+    Args:
+        project_id: UUID of the project
+        phase_id: UUID of the phase (from task)
+
+    Returns:
+        dict with phase details, or None if no phase
+    """
+    if not phase_id:
+        return None
+
+    try:
+        api_url = get_api_url()
+        timeout = get_default_timeout()
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                urljoin(api_url, f"/api/projects/{project_id}/phases/{phase_id}")
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                phase = result.get("phase", result)
+                return {
+                    "id": phase.get("id"),
+                    "phase_number": phase.get("phase_number"),
+                    "title": phase.get("title"),
+                    "description": phase.get("description"),
+                    "status": phase.get("status"),
+                    "goals": phase.get("goals", []),
+                }
+            else:
+                logger.debug(f"Could not retrieve phase {phase_id}: {response.status_code}")
+                return None
+
+    except Exception as e:
+        logger.debug(f"Error retrieving phase {phase_id}: {e}")
+        return None
+
+
+async def _get_active_phase_for_project(project_id: str) -> dict | None:
+    """
+    Get the currently active phase for a project.
+
+    Args:
+        project_id: UUID of the project
+
+    Returns:
+        dict with active phase details, or None if no active phase
+    """
+    try:
+        api_url = get_api_url()
+        timeout = get_default_timeout()
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                urljoin(api_url, f"/api/projects/{project_id}/phases/active")
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                phase = result.get("phase")
+                if phase:
+                    return {
+                        "id": phase.get("id"),
+                        "phase_number": phase.get("phase_number"),
+                        "title": phase.get("title"),
+                        "description": phase.get("description"),
+                        "status": phase.get("status"),
+                        "goals": phase.get("goals", []),
+                    }
+            return None
+
+    except Exception as e:
+        logger.debug(f"Error retrieving active phase for project {project_id}: {e}")
         return None
 
 
@@ -1448,3 +1686,141 @@ def _estimate_task_tokens(task: dict) -> dict:
             "critical": CRITICAL_THRESHOLD,
         },
     }
+
+
+async def _read_changelog_for_context() -> dict:
+    """
+    Read CHANGELOG.md and extract relevant context for phase planning.
+
+    Returns:
+        dict with:
+        - success: bool
+        - content: str - Truncated CHANGELOG content
+        - recent_entries: list - Entries from [Unreleased] section
+        - file_path: str - Path to CHANGELOG.md
+        - error: str|null - Error message if failed
+    """
+    import re
+    from pathlib import Path
+
+    # Find repo root
+    try:
+        import asyncio
+
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        if process.returncode == 0:
+            repo_root = Path(stdout.decode().strip())
+        else:
+            repo_root = Path.cwd()
+    except Exception:
+        repo_root = Path.cwd()
+
+    changelog_path = repo_root / "CHANGELOG.md"
+
+    if not changelog_path.exists():
+        return {
+            "success": False,
+            "content": None,
+            "recent_entries": [],
+            "file_path": str(changelog_path),
+            "error": "CHANGELOG.md not found",
+        }
+
+    try:
+        with open(changelog_path, "r") as f:
+            content = f.read()
+
+        # Extract recent entries from [Unreleased] section
+        recent_entries = []
+        unreleased_match = re.search(
+            r"## \[Unreleased\](.*?)(?=\n## \[|$)",
+            content,
+            re.DOTALL
+        )
+
+        if unreleased_match:
+            unreleased_content = unreleased_match.group(1)
+            # Find all bullet points with timestamps
+            entry_pattern = r"- \*\*(\d{4}-\d{2}-\d{2}[^*]*)\*\* - ([^\n]+)"
+            for match in re.finditer(entry_pattern, unreleased_content):
+                recent_entries.append({
+                    "timestamp": match.group(1).strip(),
+                    "entry": match.group(2).strip(),
+                })
+
+        # Truncate content if too long (keep first 3000 chars)
+        max_length = 3000
+        truncated_content = content[:max_length]
+        if len(content) > max_length:
+            truncated_content += f"\n\n... (truncated, {len(content)} total chars)"
+
+        return {
+            "success": True,
+            "content": truncated_content,
+            "recent_entries": recent_entries[:10],  # Last 10 entries
+            "file_path": str(changelog_path),
+            "error": None,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "content": None,
+            "recent_entries": [],
+            "file_path": str(changelog_path),
+            "error": str(e),
+        }
+
+
+def _generate_phase_recommendation(context: dict) -> str:
+    """
+    Generate a recommendation for the next phase based on context.
+
+    Args:
+        context: The gathered context including PRP, phases, tasks
+
+    Returns:
+        str: A recommendation string
+    """
+    phases = context.get("phases", [])
+    task_summary = context.get("task_summary", {})
+    prp = context.get("prp")
+
+    # Check if there are active phases
+    active_phases = [p for p in phases if p.get("status") == "active"]
+    planning_phases = [p for p in phases if p.get("status") == "planning"]
+    completed_phases = [p for p in phases if p.get("status") == "complete"]
+
+    # Check task counts
+    todo_count = task_summary.get("todo", 0)
+    doing_count = task_summary.get("doing", 0)
+    done_count = task_summary.get("done", 0)
+
+    # Generate recommendation
+    if not prp:
+        return "No PRP found. Consider running /project-new to create a project with a PRP first."
+
+    if active_phases:
+        active_phase = active_phases[0]
+        if todo_count > 0 or doing_count > 0:
+            return f"Active phase '{active_phase.get('title')}' has {todo_count} todo and {doing_count} in-progress tasks. Complete current phase before planning next."
+        else:
+            return f"Active phase '{active_phase.get('title')}' appears complete (no remaining tasks). Consider running /phase-done to summarize and close it."
+
+    if planning_phases:
+        return f"Phase '{planning_phases[0].get('title')}' is in planning status. Activate it or delete to plan a new phase."
+
+    if not phases:
+        return "No phases exist. Create the first phase based on the PRP's initial goals."
+
+    if completed_phases:
+        last_phase = max(completed_phases, key=lambda p: p.get("phase_number", 0))
+        next_num = last_phase.get("phase_number", 0) + 1
+        return f"Phase {last_phase.get('phase_number')} '{last_phase.get('title')}' is complete. Ready to create Phase {next_num} based on remaining PRP goals."
+
+    return "Review the PRP and CHANGELOG to determine the next logical phase."

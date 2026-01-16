@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 
 # Service imports
 from ..services.projects import (
+    PhaseService,
     ProjectCreationService,
     ProjectService,
     SourceLinkingService,
@@ -1275,4 +1276,283 @@ async def restore_project_version(
         logfire.error(
             f"Failed to restore version | error={str(e)} | project_id={project_id} | field_name={field_name} | version_number={version_number}"
         )
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+# Phase Management Models
+class CreatePhaseRequest(BaseModel):
+    title: str
+    description: str | None = None
+    phase_number: int | None = None
+    goals: list[str] | None = None
+
+
+class UpdatePhaseRequest(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    phase_number: int | None = None
+    status: str | None = None
+    summary: str | None = None
+    goals: list[str] | None = None
+
+
+class CompletePhaseRequest(BaseModel):
+    summary: str | None = None
+
+
+# Phase API Routes
+
+@router.get("/projects/{project_id}/phases")
+async def list_project_phases(
+    project_id: str,
+    status: str | None = None,
+):
+    """List all phases for a specific project."""
+    try:
+        logfire.debug(f"Listing project phases | project_id={project_id} | status={status}")
+
+        phase_service = PhaseService()
+        success, result = phase_service.list_phases(
+            project_id=project_id,
+            status=status,
+        )
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.debug(
+            f"Project phases retrieved | project_id={project_id} | phase_count={len(result.get('phases', []))}"
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to list project phases | project_id={project_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.post("/projects/{project_id}/phases")
+async def create_phase(project_id: str, request: CreatePhaseRequest):
+    """Create a new phase for a project."""
+    try:
+        logfire.info(f"Creating phase | project_id={project_id} | title={request.title}")
+
+        phase_service = PhaseService()
+        success, result = await phase_service.create_phase(
+            project_id=project_id,
+            title=request.title,
+            description=request.description or "",
+            phase_number=request.phase_number,
+            goals=request.goals,
+        )
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Phase created | project_id={project_id} | phase_id={result.get('phase', {}).get('id')}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to create phase | project_id={project_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/projects/{project_id}/phases/{phase_id}")
+async def get_phase(project_id: str, phase_id: str):
+    """Get a specific phase."""
+    try:
+        logfire.debug(f"Getting phase | project_id={project_id} | phase_id={phase_id}")
+
+        phase_service = PhaseService()
+        success, result = phase_service.get_phase(phase_id)
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        # Verify phase belongs to the project
+        phase = result.get("phase", {})
+        if phase.get("project_id") != project_id:
+            raise HTTPException(status_code=404, detail={"error": "Phase not found in this project"})
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to get phase | project_id={project_id} | phase_id={phase_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.put("/projects/{project_id}/phases/{phase_id}")
+async def update_phase(project_id: str, phase_id: str, request: UpdatePhaseRequest):
+    """Update a phase."""
+    try:
+        logfire.info(f"Updating phase | project_id={project_id} | phase_id={phase_id}")
+
+        # Build update fields
+        update_fields = {}
+        if request.title is not None:
+            update_fields["title"] = request.title
+        if request.description is not None:
+            update_fields["description"] = request.description
+        if request.phase_number is not None:
+            update_fields["phase_number"] = request.phase_number
+        if request.status is not None:
+            update_fields["status"] = request.status
+        if request.summary is not None:
+            update_fields["summary"] = request.summary
+        if request.goals is not None:
+            update_fields["goals"] = request.goals
+
+        if not update_fields:
+            raise HTTPException(status_code=400, detail={"error": "No fields to update"})
+
+        phase_service = PhaseService()
+        success, result = await phase_service.update_phase(phase_id, update_fields)
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Phase updated | project_id={project_id} | phase_id={phase_id}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to update phase | project_id={project_id} | phase_id={phase_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.delete("/projects/{project_id}/phases/{phase_id}")
+async def delete_phase(project_id: str, phase_id: str):
+    """Delete a phase."""
+    try:
+        logfire.info(f"Deleting phase | project_id={project_id} | phase_id={phase_id}")
+
+        phase_service = PhaseService()
+        success, result = await phase_service.delete_phase(phase_id)
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Phase deleted | project_id={project_id} | phase_id={phase_id}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to delete phase | project_id={project_id} | phase_id={phase_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.post("/projects/{project_id}/phases/{phase_id}/activate")
+async def activate_phase(project_id: str, phase_id: str):
+    """Activate a phase (sets it as current, completes any other active phases)."""
+    try:
+        logfire.info(f"Activating phase | project_id={project_id} | phase_id={phase_id}")
+
+        phase_service = PhaseService()
+        success, result = await phase_service.activate_phase(phase_id)
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Phase activated | project_id={project_id} | phase_id={phase_id}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to activate phase | project_id={project_id} | phase_id={phase_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.post("/projects/{project_id}/phases/{phase_id}/complete")
+async def complete_phase(project_id: str, phase_id: str, request: CompletePhaseRequest | None = None):
+    """Mark a phase as complete with optional summary."""
+    try:
+        logfire.info(f"Completing phase | project_id={project_id} | phase_id={phase_id}")
+
+        summary = request.summary if request else None
+
+        phase_service = PhaseService()
+        success, result = await phase_service.complete_phase(phase_id, summary=summary)
+
+        if not success:
+            if "not found" in result.get("error", "").lower():
+                raise HTTPException(status_code=404, detail=result)
+            raise HTTPException(status_code=500, detail=result)
+
+        logfire.info(f"Phase completed | project_id={project_id} | phase_id={phase_id}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to complete phase | project_id={project_id} | phase_id={phase_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/projects/{project_id}/phases/active")
+async def get_active_phase(project_id: str):
+    """Get the currently active phase for a project."""
+    try:
+        logfire.debug(f"Getting active phase | project_id={project_id}")
+
+        phase_service = PhaseService()
+        success, result = phase_service.get_active_phase(project_id)
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to get active phase | project_id={project_id}", exc_info=True)
+        raise HTTPException(status_code=500, detail={"error": str(e)})
+
+
+@router.get("/projects/{project_id}/phases/{phase_id}/tasks")
+async def get_phase_tasks(
+    project_id: str,
+    phase_id: str,
+    include_closed: bool = False,
+):
+    """Get all tasks for a specific phase."""
+    try:
+        logfire.debug(f"Getting phase tasks | project_id={project_id} | phase_id={phase_id}")
+
+        phase_service = PhaseService()
+        success, result = phase_service.get_phase_tasks(phase_id, include_closed=include_closed)
+
+        if not success:
+            raise HTTPException(status_code=500, detail=result)
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logfire.error(f"Failed to get phase tasks | project_id={project_id} | phase_id={phase_id}", exc_info=True)
         raise HTTPException(status_code=500, detail={"error": str(e)})

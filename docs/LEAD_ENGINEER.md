@@ -20,13 +20,18 @@ You work on tasks from Archon's task system using the harness commands.
 
 ### Starting Work
 ```
-/harness-next
+/harness:next
 ```
 This will:
 1. Check for any in-progress ("doing") task to resume
 2. If none, get the highest priority "todo" task
 3. Mark it as "doing"
 4. Show you what to implement
+
+**If slash command fails** (MCP session expired), use the MCP tool directly:
+```
+harness_next_task(project_id="b903113d-2a15-4225-888d-c4ff2a8d4389", mark_as_doing=true)
+```
 
 ### Completing Work
 ```
@@ -48,13 +53,18 @@ Shows project progress and task counts.
 
 - **Project:** Archon V2 Development
 - **Project ID:** `b903113d-2a15-4225-888d-c4ff2a8d4389`
-- **Current Phase:** Phase 1 - Stability
+- **Current Phase:** Phase 4 - Intelligence
 
-### Phase 1 Focus Areas
-1. Fix git operations over SSHFS
-2. Add MCP tool error visibility
-3. Establish git commit standards
-4. Documentation improvements
+### Completed Phases
+- **Phase 1:** Stability (harness commands, MCP tools, git standards)
+- **Phase 2:** Context Persistence (PRP storage, checkpoints, token estimation)
+- **Phase 3:** Project Lifecycle (phases table, /phase-plan, /phase-done, /project-new wizard)
+
+### Phase 4 Focus Areas
+1. Auto-continue mode (loop without user prompts)
+2. Test verification before marking done
+3. Smarter task decomposition
+4. TDD mode option
 
 ---
 

@@ -621,6 +621,26 @@ def register_modules():
         logger.error(traceback.format_exc())
         track_error("harness", e)
 
+    # Phase Management Tools
+    try:
+        from src.mcp_server.features.phases import register_phase_tools
+
+        register_phase_tools(mcp)
+        modules_registered += 1
+        logger.info("✓ Phase tools registered")
+    except ImportError as e:
+        logger.warning(f"⚠ Phase tools module not available (optional): {e}")
+        track_warning("phases", e)
+    except (SyntaxError, NameError, AttributeError) as e:
+        logger.error(f"✗ Code error in phase tools - MUST FIX: {e}")
+        logger.error(traceback.format_exc())
+        track_error("phases", e, "code_error")
+        raise
+    except Exception as e:
+        logger.error(f"✗ Failed to register phase tools: {e}")
+        logger.error(traceback.format_exc())
+        track_error("phases", e)
+
     logger.info(f"📦 Total modules registered: {modules_registered}")
 
     if modules_registered == 0:
