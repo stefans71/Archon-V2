@@ -413,6 +413,8 @@ class TaskService:
             if "phase_id" in update_fields:
                 update_data["phase_id"] = update_fields["phase_id"]
 
+            logger.debug(f"Updating task {task_id} with data: {update_data}")
+
             # Update task
             response = (
                 self.supabase_client.table("archon_tasks")
@@ -421,12 +423,14 @@ class TaskService:
                 .execute()
             )
 
+            logger.debug(f"Supabase update response for task {task_id}: data={response.data}")
+
             if response.data:
                 task = response.data[0]
-
-
+                logger.info(f"Task {task_id} updated successfully. New status: {task.get('status')}")
                 return True, {"task": task, "message": "Task updated successfully"}
             else:
+                logger.warning(f"Task update returned no data for task_id={task_id}")
                 return False, {"error": f"Task with ID {task_id} not found"}
 
         except Exception as e:

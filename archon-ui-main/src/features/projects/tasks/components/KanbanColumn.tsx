@@ -17,6 +17,7 @@ interface KanbanColumnProps {
   onTaskDelete?: (task: Task) => void;
   hoveredTaskId: string | null;
   onTaskHover: (taskId: string | null) => void;
+  footerAction?: React.ReactNode;
 }
 
 export const KanbanColumn = ({
@@ -30,6 +31,7 @@ export const KanbanColumn = ({
   onTaskDelete,
   hoveredTaskId,
   onTaskHover,
+  footerAction,
 }: KanbanColumnProps) => {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -123,6 +125,11 @@ export const KanbanColumn = ({
             onTaskHover={onTaskHover}
           />
         ))}
+        {footerAction && (
+          <div className="pt-2 pb-1">
+            {footerAction}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -807,6 +807,7 @@ class UpdateTaskRequest(BaseModel):
     task_order: int | None = None
     priority: str | None = None
     feature: str | None = None
+    phase_id: str | None = None
 
 
 class CreateDocumentRequest(BaseModel):
@@ -857,6 +858,10 @@ async def update_task(task_id: str, request: UpdateTaskRequest):
             update_fields["priority"] = request.priority
         if request.feature is not None:
             update_fields["feature"] = request.feature
+        if request.phase_id is not None:
+            update_fields["phase_id"] = request.phase_id
+
+        logfire.debug(f"Task update request | task_id={task_id} | update_fields={update_fields}")
 
         # Use TaskService to update the task
         task_service = TaskService()

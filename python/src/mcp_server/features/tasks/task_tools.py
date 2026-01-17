@@ -207,7 +207,8 @@ def register_task_tools(mcp: FastMCP):
         status: str | None = None,
         assignee: str | None = None,
         task_order: int | None = None,
-        feature: str | None = None
+        feature: str | None = None,
+        phase_id: str | None = None,
     ) -> str:
         """
         Manage tasks (consolidated: create/update/delete).
@@ -232,6 +233,7 @@ def register_task_tools(mcp: FastMCP):
                      Default: "User"
             task_order: Priority 0-100 (higher = more priority)
             feature: Feature label for grouping
+            phase_id: Phase UUID to assign task to (or null to remove from phase)
 
         Examples:
           manage_task("create", project_id="p-1", title="Research existing patterns", description="Study codebase for similar implementations")
@@ -307,6 +309,8 @@ def register_task_tools(mcp: FastMCP):
                         update_fields["task_order"] = task_order
                     if feature is not None:
                         update_fields["feature"] = feature
+                    if phase_id is not None:
+                        update_fields["phase_id"] = phase_id
 
                     if not update_fields:
                         return MCPErrorFormatter.format_error(

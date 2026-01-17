@@ -597,11 +597,16 @@ def register_harness_tools(mcp: FastMCP):
         task_id: str,
         commit_message: str | None = None,
         auto_commit: bool = False,
+        auto_continue: bool = True,
+        skip_tests: bool = False,
     ) -> str:
         """
         Mark a task as done and optionally commit changes to git.
 
         Also appends a timestamped entry to CHANGELOG.md under [Unreleased].
+        By default, automatically retrieves the next task for continuous workflow.
+        Optionally runs tests before completing - if tests fail, the task stays
+        in "doing" status and must be fixed.
 
         Args:
             task_id: UUID of the task to complete
@@ -609,22 +614,41 @@ def register_harness_tools(mcp: FastMCP):
                            If not provided, generates one from task title.
             auto_commit: If True, stages all changes and creates a git commit
                         (default: False)
+            auto_continue: If True (default), automatically gets the next task
+                          and returns it in the response for continuous workflow.
+            skip_tests: If True, skips test verification before completing.
+                       Use when tests don't exist or aren't applicable.
+                       (default: False)
 
         Returns:
             JSON with structure:
             - success: bool - Whether completion succeeded
-            - task: dict - The completed task
+            - task: dict - The completed task (or current task if tests failed)
+            - tests: dict|null - Test verification results
+              - passed: bool - Whether tests passed
+              - output: str - Test output (truncated if long)
+              - skipped: bool - Whether tests were skipped
             - commit: dict|null - Git commit info if auto_commit was True
               - hash: str - Commit hash
               - message: str - Commit message used
             - changelog: dict|null - Changelog entry info
               - entry: str - The entry that was added
               - section: str - Which section (Added/Changed/Fixed)
+            - next_task: dict|null - The next task to work on (if auto_continue=True)
+              - id: str - Task UUID
+              - title: str - Task title
+              - description: str - Task description
+              - status: str - Task status (will be "doing" if marked)
+            - remaining_count: int|null - Number of remaining todo tasks
+            - all_complete: bool - True if no more tasks remain
             - error: str|null - Error message if failed
 
         Note:
             Git operations are performed in the current working directory.
             If not in a git repository, auto_commit will be skipped with a warning.
+
+            If tests fail, the task remains in "doing" status and the response
+            includes test output. The LLM should fix the issues and retry.
         """
         try:
             if not task_id:
@@ -636,6 +660,22 @@ def register_harness_tools(mcp: FastMCP):
 
             api_url = get_api_url()
             timeout = get_default_timeout()
+
+            # Run tests before marking task as done (unless skipped)
+            test_result = None
+            if not skip_tests:
+                test_result = await _run_test_verification()
+                if test_result and not test_result.get("passed", True):
+                    # Tests failed - return error without changing task status
+                    return json.dumps({
+                        "success": False,
+                        "task": None,
+                        "tests": test_result,
+                        "error": "Tests failed. Fix the issues and try again.",
+                        "message": "Task not completed - tests failed. The task remains in 'doing' status.",
+                    })
+            else:
+                test_result = {"skipped": True, "passed": True}
 
             async with httpx.AsyncClient(timeout=timeout) as client:
                 # Update task status to done
@@ -688,13 +728,37 @@ def register_harness_tools(mcp: FastMCP):
                 except Exception as e:
                     logger.debug(f"Could not update changelog for task {task_id}: {e}")
 
+                # Auto-continue: Get next task if requested
+                next_task_info = None
+                remaining_count = None
+                all_complete = False
+
+                if auto_continue:
+                    project_id = task.get("project_id")
+                    if project_id:
+                        next_task_result = await _get_next_task_for_project(
+                            client, api_url, project_id, mark_as_doing=True
+                        )
+                        if next_task_result.get("success"):
+                            next_task_info = next_task_result.get("task")
+                            remaining_count = next_task_result.get("remaining_count", 0)
+                            all_complete = next_task_info is None
+                        else:
+                            # No more tasks or error - mark as complete
+                            all_complete = next_task_result.get("all_complete", True)
+                            remaining_count = 0
+
                 return json.dumps({
                     "success": True,
                     "task": task,
+                    "tests": test_result,
                     "commit": commit_info,
                     "checkpoint_cleared": checkpoint_cleared,
                     "changelog": changelog_result,
                     "message": f"Task completed: {task.get('title')}",
+                    "next_task": next_task_info,
+                    "remaining_count": remaining_count,
+                    "all_complete": all_complete,
                 })
 
         except httpx.RequestError as e:
@@ -977,6 +1041,265 @@ async def _get_todo_count(client: httpx.AsyncClient, api_url: str, project_id: s
     except Exception:
         pass
     return 0
+
+
+async def _get_next_task_for_project(
+    client: httpx.AsyncClient,
+    api_url: str,
+    project_id: str,
+    mark_as_doing: bool = True,
+) -> dict:
+    """
+    Get the next task for a project (internal helper for auto-continue).
+
+    This is a simplified version of harness_next_task for internal use.
+
+    Args:
+        client: httpx AsyncClient instance
+        api_url: Base API URL
+        project_id: UUID of the project
+        mark_as_doing: If True, marks the task as "doing"
+
+    Returns:
+        dict with:
+        - success: bool
+        - task: dict|null - The next task
+        - remaining_count: int - Number of remaining todo tasks
+        - all_complete: bool - True if no more tasks
+    """
+    try:
+        # First check for any task already in "doing" status
+        doing_response = await client.get(
+            urljoin(api_url, "/api/tasks"),
+            params={
+                "project_id": project_id,
+                "status": "doing",
+                "per_page": 1,
+            },
+        )
+
+        if doing_response.status_code == 200:
+            doing_result = doing_response.json()
+            doing_tasks = doing_result.get("tasks", [])
+
+            if doing_tasks:
+                # Return existing in-progress task
+                task = doing_tasks[0]
+                todo_count = await _get_todo_count(client, api_url, project_id)
+                return {
+                    "success": True,
+                    "task": task,
+                    "remaining_count": todo_count,
+                    "all_complete": False,
+                    "resumed": True,
+                }
+
+        # No doing task, get next todo task
+        todo_response = await client.get(
+            urljoin(api_url, "/api/tasks"),
+            params={
+                "project_id": project_id,
+                "status": "todo",
+                "per_page": 100,
+                "include_closed": False,
+            },
+        )
+
+        if todo_response.status_code != 200:
+            return {
+                "success": False,
+                "task": None,
+                "remaining_count": 0,
+                "all_complete": True,
+                "error": f"HTTP {todo_response.status_code}",
+            }
+
+        todo_result = todo_response.json()
+        todo_tasks = todo_result.get("tasks", [])
+
+        if not todo_tasks:
+            return {
+                "success": True,
+                "task": None,
+                "remaining_count": 0,
+                "all_complete": True,
+            }
+
+        # Sort by task_order to get highest priority (lowest order number)
+        sorted_tasks = sorted(todo_tasks, key=lambda t: t.get("task_order", 9999))
+        next_task = sorted_tasks[0]
+
+        # Mark as doing if requested
+        if mark_as_doing:
+            update_response = await client.put(
+                urljoin(api_url, f"/api/tasks/{next_task['id']}"),
+                json={"status": "doing"},
+            )
+
+            if update_response.status_code == 200:
+                update_result = update_response.json()
+                next_task = update_result.get("task", next_task)
+
+        return {
+            "success": True,
+            "task": next_task,
+            "remaining_count": len(todo_tasks) - 1,
+            "all_complete": False,
+            "resumed": False,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting next task for project {project_id}: {e}")
+        return {
+            "success": False,
+            "task": None,
+            "remaining_count": 0,
+            "all_complete": True,
+            "error": str(e),
+        }
+
+
+async def _run_test_verification() -> dict:
+    """
+    Run test verification before marking a task as complete.
+
+    Detects the test framework and runs appropriate tests.
+    Returns a dict with test results.
+
+    Returns:
+        dict with:
+        - passed: bool - Whether tests passed
+        - output: str - Test output (truncated if long)
+        - framework: str - Detected test framework
+        - skipped: bool - Whether tests were skipped (no framework found)
+        - error: str|null - Error message if something went wrong
+    """
+    import asyncio
+    import os
+    from pathlib import Path
+
+    # Determine repo root
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--show-toplevel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+        if process.returncode == 0:
+            repo_root = Path(stdout.decode().strip())
+        else:
+            repo_root = Path.cwd()
+    except Exception:
+        repo_root = Path.cwd()
+
+    # Detect test framework and build command
+    test_cmd = None
+    framework = None
+
+    # Check for Python pytest
+    if (repo_root / "pytest.ini").exists() or \
+       (repo_root / "pyproject.toml").exists() or \
+       (repo_root / "tests").exists() or \
+       (repo_root / "python" / "tests").exists():
+        # Check if pytest is available
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "which", "pytest",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=5)
+            if proc.returncode == 0:
+                test_cmd = ["pytest", "-v", "--tb=short", "-x"]  # Stop on first failure
+                framework = "pytest"
+        except Exception:
+            pass
+
+    # Check for Node.js test frameworks (if no Python tests found)
+    if not test_cmd:
+        package_json_paths = [
+            repo_root / "package.json",
+            repo_root / "archon-ui-main" / "package.json",
+        ]
+        for pkg_path in package_json_paths:
+            if pkg_path.exists():
+                try:
+                    import json as json_module
+                    with open(pkg_path, "r") as f:
+                        pkg = json_module.load(f)
+                    scripts = pkg.get("scripts", {})
+                    if "test" in scripts:
+                        test_cmd = ["npm", "test", "--", "--run"]  # --run for non-watch mode
+                        framework = "npm/vitest"
+                        break
+                except Exception:
+                    pass
+
+    # No test framework detected
+    if not test_cmd:
+        logger.info("No test framework detected, skipping test verification")
+        return {
+            "passed": True,
+            "skipped": True,
+            "output": "No test framework detected. Tests skipped.",
+            "framework": None,
+        }
+
+    # Run tests
+    try:
+        logger.info(f"Running tests with {framework}: {' '.join(test_cmd)}")
+        process = await asyncio.create_subprocess_exec(
+            *test_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(repo_root),
+        )
+
+        # Wait for completion with timeout (5 minutes max)
+        stdout, _ = await asyncio.wait_for(
+            process.communicate(),
+            timeout=300,
+        )
+
+        output = stdout.decode() if stdout else ""
+
+        # Truncate output if too long (keep first and last parts)
+        max_output_length = 5000
+        if len(output) > max_output_length:
+            half = max_output_length // 2
+            output = output[:half] + "\n\n... (output truncated) ...\n\n" + output[-half:]
+
+        passed = process.returncode == 0
+
+        logger.info(f"Tests {'passed' if passed else 'failed'} (exit code: {process.returncode})")
+
+        return {
+            "passed": passed,
+            "output": output,
+            "framework": framework,
+            "skipped": False,
+            "exit_code": process.returncode,
+        }
+
+    except asyncio.TimeoutError:
+        logger.error("Test execution timed out after 5 minutes")
+        return {
+            "passed": False,
+            "output": "Test execution timed out after 5 minutes",
+            "framework": framework,
+            "skipped": False,
+            "error": "Timeout",
+        }
+    except Exception as e:
+        logger.error(f"Error running tests: {e}")
+        return {
+            "passed": False,
+            "output": str(e),
+            "framework": framework,
+            "skipped": False,
+            "error": str(e),
+        }
 
 
 async def _get_prp_context(project_id: str) -> dict | None:
