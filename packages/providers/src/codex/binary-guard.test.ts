@@ -2,7 +2,7 @@
  * Tests for Codex binary resolution in compiled binary mode.
  *
  * Separate file because mock.module('@archon/paths') with BUNDLED_IS_BINARY=true
- * conflicts with codex.test.ts which mocks it without BUNDLED_IS_BINARY.
+ * conflicts with provider.test.ts which mocks it without BUNDLED_IS_BINARY.
  * Must run in its own bun test invocation (see package.json test script).
  */
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
@@ -45,63 +45,35 @@ mock.module('@openai/codex-sdk', () => ({
   Codex: MockCodex,
 }));
 
-// Mock resolver — controls binary resolution behavior per test
+// Mock resolver -- controls binary resolution behavior per test
 const mockResolveCodexBinaryPath = mock(
   (_configPath?: string): Promise<string | undefined> =>
     Promise.resolve('/tmp/test-archon/vendor/codex/codex')
 );
-mock.module('../utils/codex-binary-resolver', () => ({
+mock.module('./binary-resolver', () => ({
   resolveCodexBinaryPath: mockResolveCodexBinaryPath,
 }));
 
-// Config mock with configurable return value
-const mockLoadConfig = mock(() =>
-  Promise.resolve({
-    allowTargetRepoKeys: false,
-    assistants: { codex: {} },
-  })
-);
+import { CodexProvider, resetCodexSingleton } from './provider';
 
-// Mock db and config dependencies to prevent real DB access
-mock.module('../db/codebases', () => ({
-  findCodebaseByDefaultCwd: mock(() => Promise.resolve(null)),
-  findCodebaseByPathPrefix: mock(() => Promise.resolve(null)),
-}));
-mock.module('../config/config-loader', () => ({
-  loadConfig: mockLoadConfig,
-}));
-mock.module('../utils/env-leak-scanner', () => ({
-  scanPathForSensitiveKeys: mock(() => ({ findings: [] })),
-  EnvLeakError: class extends Error {},
-}));
-
-import { CodexClient, resetCodexSingleton } from './codex';
-
-describe('CodexClient binary mode resolution', () => {
+describe('CodexProvider binary mode resolution', () => {
   beforeEach(() => {
     resetCodexSingleton();
     MockCodex.mockClear();
     mockStartThread.mockClear();
     mockResolveCodexBinaryPath.mockClear();
-    mockLoadConfig.mockClear();
     capturedOptions = undefined;
 
     // Restore default mock implementations
     mockResolveCodexBinaryPath.mockImplementation(() =>
       Promise.resolve('/tmp/test-archon/vendor/codex/codex')
     );
-    mockLoadConfig.mockImplementation(() =>
-      Promise.resolve({
-        allowTargetRepoKeys: false,
-        assistants: { codex: {} },
-      })
-    );
   });
 
   test('passes resolved binary path to Codex constructor via codexPathOverride', async () => {
     mockResolveCodexBinaryPath.mockResolvedValueOnce('/custom/path/to/codex');
 
-    const client = new CodexClient();
+    const client = new CodexProvider();
     const generator = client.sendQuery('test prompt', '/tmp/test');
 
     // Consume events to trigger initialization
@@ -118,7 +90,7 @@ describe('CodexClient binary mode resolution', () => {
       new Error('Codex native binary not found at /tmp/test-archon/vendor/codex/codex')
     );
 
-    const client = new CodexClient();
+    const client = new CodexProvider();
     const generator = client.sendQuery('test prompt', '/tmp/test');
 
     await expect(generator.next()).rejects.toThrow('Codex native binary not found');
@@ -129,7 +101,7 @@ describe('CodexClient binary mode resolution', () => {
       .mockRejectedValueOnce(new Error('Codex CLI binary not found'))
       .mockResolvedValueOnce('/tmp/test-archon/vendor/codex/codex');
 
-    const client = new CodexClient();
+    const client = new CodexProvider();
 
     // First call fails
     await expect(client.sendQuery('test prompt', '/tmp/test').next()).rejects.toThrow(
@@ -150,7 +122,7 @@ describe('CodexClient binary mode resolution', () => {
   test('does not pass codexPathOverride when resolver returns undefined', async () => {
     mockResolveCodexBinaryPath.mockResolvedValueOnce(undefined);
 
-    const client = new CodexClient();
+    const client = new CodexProvider();
     const generator = client.sendQuery('test prompt', '/tmp/test');
 
     for await (const _chunk of generator) {
@@ -161,14 +133,11 @@ describe('CodexClient binary mode resolution', () => {
     expect(capturedOptions?.codexPathOverride).toBeUndefined();
   });
 
-  test('passes config codexBinaryPath to resolver', async () => {
-    mockLoadConfig.mockResolvedValueOnce({
-      allowTargetRepoKeys: false,
-      assistants: { codex: { codexBinaryPath: '/user/custom/codex' } },
+  test('passes config codexBinaryPath to resolver via assistantConfig', async () => {
+    const client = new CodexProvider();
+    const generator = client.sendQuery('test prompt', '/tmp/test', undefined, {
+      assistantConfig: { codexBinaryPath: '/user/custom/codex' },
     });
-
-    const client = new CodexClient();
-    const generator = client.sendQuery('test prompt', '/tmp/test');
 
     for await (const _chunk of generator) {
       // drain

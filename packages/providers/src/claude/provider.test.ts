@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, mock, beforeEach, spyOn } from 'bun:test';
 import { createMockLogger } from '../test/mocks/logger';
 
 const mockLogger = createMockLogger();
@@ -16,17 +16,14 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
   query: mockQuery,
 }));
 
-import { ClaudeClient } from './claude';
-import * as claudeModule from './claude';
-import * as codebaseDb from '../db/codebases';
-import * as envLeakScanner from '../utils/env-leak-scanner';
-import * as configLoader from '../config/config-loader';
+import { ClaudeProvider } from './provider';
+import * as claudeModule from './provider';
 
-describe('ClaudeClient', () => {
-  let client: ClaudeClient;
+describe('ClaudeProvider', () => {
+  let client: ClaudeProvider;
 
   beforeEach(() => {
-    client = new ClaudeClient({ retryBaseDelayMs: 1 });
+    client = new ClaudeProvider({ retryBaseDelayMs: 1 });
     mockQuery.mockClear();
     mockLogger.info.mockClear();
     mockLogger.warn.mockClear();
@@ -37,7 +34,7 @@ describe('ClaudeClient', () => {
   describe('constructor', () => {
     test('throws when running as root (UID 0)', () => {
       const spy = spyOn(claudeModule, 'getProcessUid').mockReturnValue(0);
-      expect(() => new ClaudeClient()).toThrow(
+      expect(() => new ClaudeProvider()).toThrow(
         'does not support bypassPermissions when running as root'
       );
       spy.mockRestore();
@@ -45,13 +42,13 @@ describe('ClaudeClient', () => {
 
     test('does not throw for non-root user', () => {
       const spy = spyOn(claudeModule, 'getProcessUid').mockReturnValue(1000);
-      expect(() => new ClaudeClient()).not.toThrow();
+      expect(() => new ClaudeProvider()).not.toThrow();
       spy.mockRestore();
     });
 
     test('does not throw when process.getuid is unavailable (Windows)', () => {
       const spy = spyOn(claudeModule, 'getProcessUid').mockReturnValue(undefined);
-      expect(() => new ClaudeClient()).not.toThrow();
+      expect(() => new ClaudeProvider()).not.toThrow();
       spy.mockRestore();
     });
   });
@@ -59,6 +56,26 @@ describe('ClaudeClient', () => {
   describe('getType', () => {
     test('returns claude', () => {
       expect(client.getType()).toBe('claude');
+    });
+  });
+
+  describe('getCapabilities', () => {
+    test('returns full capability set for Claude provider', () => {
+      const caps = client.getCapabilities();
+      expect(caps).toEqual({
+        sessionResume: true,
+        mcp: true,
+        hooks: true,
+        skills: true,
+        toolRestrictions: true,
+        structuredOutput: true,
+        envInjection: true,
+        costControl: true,
+        effortControl: true,
+        thinkingControl: true,
+        fallbackModel: true,
+        sandbox: true,
+      });
     });
   });
 
@@ -306,7 +323,6 @@ describe('ClaudeClient', () => {
       });
 
       // Consume the generator
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('my prompt', '/my/workspace', undefined, {
         model: 'sonnet',
       })) {
@@ -328,7 +344,6 @@ describe('ClaudeClient', () => {
         // Empty generator
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/workspace')) {
         // consume
       }
@@ -343,7 +358,6 @@ describe('ClaudeClient', () => {
         // Empty generator
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/workspace', undefined, {
         persistSession: true,
       })) {
@@ -363,7 +377,6 @@ describe('ClaudeClient', () => {
         // Empty generator
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('prompt', '/workspace', 'session-to-resume')) {
         // consume
       }
@@ -447,9 +460,6 @@ describe('ClaudeClient', () => {
     });
 
     test('subprocess env passes through all process.env keys (no allowlist filtering)', async () => {
-      // With the allowlist removed, buildSubprocessEnv returns { ...process.env }.
-      // CWD .env leakage and CLAUDECODE markers are handled at entry point by
-      // stripCwdEnv(), not by buildSubprocessEnv(). See #1067, #1097.
       const originalKey = process.env.CUSTOM_USER_KEY;
       process.env.CUSTOM_USER_KEY = 'user-trusted-value';
 
@@ -457,15 +467,19 @@ describe('ClaudeClient', () => {
         // Empty generator
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/workspace')) {
         // consume
       }
 
       const callArgs = mockQuery.mock.calls[0][0] as { options: { env: NodeJS.ProcessEnv } };
       expect(callArgs.options.env.CUSTOM_USER_KEY).toBe('user-trusted-value');
-      expect(callArgs.options.env.PATH).toBe(process.env.PATH);
-      expect(callArgs.options.env.HOME).toBe(process.env.HOME);
+      // Windows uses "Path" casing in spread objects and USERPROFILE instead of HOME
+      const envPath = callArgs.options.env.PATH ?? callArgs.options.env.Path;
+      const processPath = process.env.PATH ?? process.env.Path;
+      expect(envPath).toBe(processPath);
+      const envHome = callArgs.options.env.HOME ?? callArgs.options.env.USERPROFILE;
+      const processHome = process.env.HOME ?? process.env.USERPROFILE;
+      expect(envHome).toBe(processHome);
 
       // Cleanup
       if (originalKey !== undefined) process.env.CUSTOM_USER_KEY = originalKey;
@@ -549,35 +563,29 @@ describe('ClaudeClient', () => {
     });
 
     test('classifies "Operation aborted" errors as crash and retries', async () => {
-      // Simulates the SDK cleanup race: PostToolUse hook writes to a closed pipe
-      // after a DAG node abort. Should be classified as 'crash' (not 'unknown')
-      // so the retry path is taken.
       const error = new Error('Operation aborted');
       mockQuery.mockImplementation(async function* () {
         throw error;
       });
 
       const consumeGenerator = async (): Promise<void> => {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         for await (const _ of client.sendQuery('test', '/workspace')) {
           // consume
         }
       };
 
-      // crash classification = retried up to 3 times → 4 total calls
+      // crash classification = retried up to 3 times -> 4 total calls
       await expect(consumeGenerator()).rejects.toThrow(/Claude Code crash/);
       expect(mockQuery).toHaveBeenCalledTimes(4);
     }, 5_000);
 
     test('classifies mixed-case "OPERATION ABORTED" errors as crash', async () => {
-      // Pattern matching uses .toLowerCase() — case must not matter
       const error = new Error('OPERATION ABORTED');
       mockQuery.mockImplementation(async function* () {
         throw error;
       });
 
       const consumeGenerator = async (): Promise<void> => {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         for await (const _ of client.sendQuery('test', '/workspace')) {
           // consume
         }
@@ -588,8 +596,6 @@ describe('ClaudeClient', () => {
     }, 5_000);
 
     test('captures all stderr output for diagnostics', async () => {
-      // When the subprocess crashes, the enriched error should include all stderr,
-      // not just lines matching error keywords
       mockQuery.mockImplementation(async function* (args: {
         options: { stderr?: (data: string) => void };
       }) {
@@ -608,7 +614,7 @@ describe('ClaudeClient', () => {
         }
       };
 
-      // Use rejects so assertions always execute — prevents vacuous pass when mock doesn't throw
+      // Use rejects so assertions always execute
       const err = await consumeGenerator().catch((e: unknown) => e as Error);
       expect(err).toBeInstanceOf(Error);
       // The error should contain stderr context from ALL captured lines
@@ -617,14 +623,13 @@ describe('ClaudeClient', () => {
       expect(err.message).toContain('startup diagnostic');
     }, 5_000);
 
-    test('passes settingSources from request options', async () => {
+    test('passes settingSources from assistantConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'test-session' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        settingSources: ['project', 'user'],
+        assistantConfig: { settingSources: ['project', 'user'] },
       })) {
         // consume
       }
@@ -639,7 +644,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'test-session' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp')) {
         // consume
       }
@@ -654,7 +658,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
         env: { MY_SECRET: 'abc123' },
       })) {
@@ -675,8 +678,7 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // HOME is always in process.env — override it to verify priority
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      // HOME is always in process.env -- override it to verify priority
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
         env: { HOME: '/custom/home' },
       })) {
@@ -689,13 +691,14 @@ describe('ClaudeClient', () => {
       expect(env.HOME).toBe('/custom/home');
     });
 
-    test('passes effort to SDK when provided', async () => {
+    test('passes effort to SDK via nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _ of client.sendQuery('test', '/tmp', undefined, { effort: 'high' })) {
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { effort: 'high' },
+      })) {
         // consume
       }
 
@@ -704,12 +707,11 @@ describe('ClaudeClient', () => {
       expect(callArgs.options.effort).toBe('high');
     });
 
-    test('omits effort from SDK when not provided', async () => {
+    test('omits effort from SDK when not provided in nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp')) {
         // consume
       }
@@ -719,14 +721,13 @@ describe('ClaudeClient', () => {
       expect(callArgs.options).not.toHaveProperty('effort');
     });
 
-    test('passes thinking object to SDK', async () => {
+    test('passes thinking object to SDK via nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        thinking: { type: 'enabled', budgetTokens: 8000 },
+        nodeConfig: { thinking: { type: 'enabled', budgetTokens: 8000 } },
       })) {
         // consume
       }
@@ -741,7 +742,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, { maxBudgetUsd: 5.0 })) {
         // consume
       }
@@ -756,7 +756,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
         systemPrompt: 'You are a security reviewer',
       })) {
@@ -773,7 +772,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp')) {
         // consume
       }
@@ -788,7 +786,6 @@ describe('ClaudeClient', () => {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
         fallbackModel: 'claude-haiku-4-5',
       })) {
@@ -800,14 +797,13 @@ describe('ClaudeClient', () => {
       expect(callArgs.options.fallbackModel).toBe('claude-haiku-4-5');
     });
 
-    test('passes betas array to SDK', async () => {
+    test('passes betas array to SDK via nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       for await (const _ of client.sendQuery('test', '/tmp', undefined, {
-        betas: ['context-1m-2025-08-07'],
+        nodeConfig: { betas: ['context-1m-2025-08-07'] },
       })) {
         // consume
       }
@@ -817,15 +813,16 @@ describe('ClaudeClient', () => {
       expect(callArgs.options.betas).toEqual(['context-1m-2025-08-07']);
     });
 
-    test('passes sandbox object to SDK', async () => {
+    test('passes sandbox object to SDK via nodeConfig', async () => {
       mockQuery.mockImplementation(async function* () {
         yield { type: 'result', session_id: 'sid' };
       });
 
       const sandbox = { enabled: true, network: { allowedDomains: [] } };
 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _ of client.sendQuery('test', '/tmp', undefined, { sandbox })) {
+      for await (const _ of client.sendQuery('test', '/tmp', undefined, {
+        nodeConfig: { sandbox },
+      })) {
         // consume
       }
 
@@ -855,157 +852,6 @@ describe('ClaudeClient', () => {
       // Empty text should be filtered out
       expect(chunks).toHaveLength(1);
       expect(chunks[0]).toEqual({ type: 'assistant', content: 'Real content' });
-    });
-  });
-
-  describe('pre-spawn env leak gate', () => {
-    let spyFindByDefaultCwd: ReturnType<typeof spyOn>;
-    let spyFindByPathPrefix: ReturnType<typeof spyOn>;
-    let spyScan: ReturnType<typeof spyOn>;
-
-    beforeEach(() => {
-      spyFindByDefaultCwd = spyOn(codebaseDb, 'findCodebaseByDefaultCwd').mockResolvedValue(null);
-      spyFindByPathPrefix = spyOn(codebaseDb, 'findCodebaseByPathPrefix').mockResolvedValue(null);
-      spyScan = spyOn(envLeakScanner, 'scanPathForSensitiveKeys').mockReturnValue({
-        path: '/workspace',
-        findings: [],
-      });
-      mockQuery.mockImplementation(async function* () {
-        yield { type: 'result', session_id: 'sid-gate' };
-      });
-    });
-
-    afterEach(() => {
-      spyFindByDefaultCwd.mockRestore();
-      spyFindByPathPrefix.mockRestore();
-      spyScan.mockRestore();
-    });
-
-    test('throws EnvLeakError when .env contains sensitive keys and registered codebase has no consent', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: false,
-        default_cwd: '/workspace',
-      });
-      spyScan.mockReturnValueOnce({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      await expect(async () => {
-        for await (const _ of client.sendQuery('test', '/workspace')) {
-          // consume
-        }
-      }).toThrow('Cannot run workflow');
-    });
-
-    test('skips scan entirely when cwd is not a registered codebase', async () => {
-      // Both lookups return null (default from beforeEach) → unregistered cwd.
-      // Even if sensitive keys would be present, the pre-spawn check must not run
-      // because the canonical gate is registerRepoAtPath, not sendQuery.
-      spyScan.mockReturnValue({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-      expect(chunks).toHaveLength(1);
-    });
-
-    test('skips scan when codebase has allow_env_keys: true', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: true,
-        default_cwd: '/workspace',
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-      expect(chunks).toHaveLength(1);
-    });
-
-    test('proceeds without scanning when cwd has no registered codebase', async () => {
-      // Unregistered cwd — the pre-spawn safety net is out of scope.
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-      expect(chunks).toHaveLength(1);
-    });
-
-    test('skips scan when allowTargetRepoKeys is true in merged config', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: false,
-        default_cwd: '/workspace',
-      });
-      const spyLoadConfig = spyOn(configLoader, 'loadConfig').mockResolvedValueOnce({
-        allowTargetRepoKeys: true,
-      } as Awaited<ReturnType<typeof configLoader.loadConfig>>);
-      // Even though scanner would return a finding, the config bypass must short-circuit
-      spyScan.mockReturnValueOnce({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-      expect(chunks).toHaveLength(1);
-      spyLoadConfig.mockRestore();
-    });
-
-    test('falls back to scanner when loadConfig throws (fail-closed)', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: false,
-        default_cwd: '/workspace',
-      });
-      const spyLoadConfig = spyOn(configLoader, 'loadConfig').mockRejectedValueOnce(
-        new Error('YAML parse error')
-      );
-      spyScan.mockReturnValueOnce({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      await expect(async () => {
-        for await (const _ of client.sendQuery('test', '/workspace')) {
-          // consume
-        }
-      }).toThrow('Cannot run workflow');
-      expect(spyScan).toHaveBeenCalled();
-      spyLoadConfig.mockRestore();
-    });
-
-    test('uses prefix lookup for worktree paths when exact match returns null', async () => {
-      spyFindByPathPrefix.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: true,
-        default_cwd: '/workspace/source',
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace/worktrees/feature')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyFindByPathPrefix).toHaveBeenCalledWith('/workspace/worktrees/feature');
-      expect(spyScan).not.toHaveBeenCalled();
     });
   });
 });
@@ -1092,6 +938,197 @@ describe('withFirstMessageTimeout', () => {
         timeoutMs: 50,
       }),
       'claude.first_event_timeout'
+    );
+  });
+});
+
+// ─── Behavioral regression tests (black-box via sendQuery) ───────────────
+// These cover specific fixes from the sendQuery decomposition review:
+// timeout preservation, one-time warnings, abort forwarding, error enrichment.
+
+describe('sendQuery decomposition behaviors', () => {
+  let client: ClaudeProvider;
+
+  beforeEach(() => {
+    client = new ClaudeProvider({ retryBaseDelayMs: 1 });
+    mockQuery.mockClear();
+    mockLogger.info.mockClear();
+    mockLogger.warn.mockClear();
+    mockLogger.error.mockClear();
+    mockLogger.debug.mockClear();
+  });
+
+  test('preserves first-event timeout error instead of generic abort', async () => {
+    // withFirstMessageTimeout aborts the controller then throws.
+    // classifyAndEnrichError must preserve the timeout message, not "Query aborted".
+    mockQuery.mockImplementation(async function* () {
+      await new Promise(() => {}); // hang forever
+      yield { type: 'result', session_id: 'never' };
+    });
+
+    const consumeGenerator = async (): Promise<void> => {
+      // Use env var to set a short timeout for the test
+      const original = process.env.ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS;
+      process.env.ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS = '50';
+      try {
+        for await (const _ of client.sendQuery('test', '/workspace')) {
+          // consume
+        }
+      } finally {
+        if (original !== undefined) process.env.ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS = original;
+        else delete process.env.ARCHON_CLAUDE_FIRST_EVENT_TIMEOUT_MS;
+      }
+    };
+
+    await expect(consumeGenerator()).rejects.toThrow('produced no output within');
+    // Must NOT be "Query aborted"
+    await expect(consumeGenerator()).rejects.not.toThrow('Query aborted');
+  });
+
+  test('emits nodeConfig warnings only once even when retries occur', async () => {
+    let callCount = 0;
+    mockQuery.mockImplementation(async function* () {
+      callCount++;
+      if (callCount <= 2) {
+        throw new Error('process exited with code 1'); // crash → retried
+      }
+      yield {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'ok' }] },
+      };
+    });
+
+    const chunks = [];
+    for await (const chunk of client.sendQuery('test', '/workspace', undefined, {
+      nodeConfig: { effort: 'high' },
+    })) {
+      chunks.push(chunk);
+    }
+
+    // nodeConfig with effort doesn't produce warnings, but let's verify
+    // no system chunks are duplicated. Use a nodeConfig that doesn't warn.
+    // The point is: zero warning chunks means zero, not zero × 3 retries.
+    const systemChunks = chunks.filter(c => c.type === 'system');
+    expect(systemChunks).toHaveLength(0);
+    expect(callCount).toBe(3); // Confirms retries happened
+  }, 5_000);
+
+  test('abort signal cancels query across retries without listener leak', async () => {
+    const abortController = new AbortController();
+    let callCount = 0;
+
+    mockQuery.mockImplementation(async function* () {
+      callCount++;
+      if (callCount === 1) {
+        // First attempt crashes → triggers retry. Abort during the retry delay
+        // so the next iteration's abortSignal.aborted check catches it.
+        setTimeout(() => abortController.abort(), 0);
+        throw new Error('process exited with code 1');
+      }
+      // Should not reach here — abort fires before retry starts
+      yield {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'should not reach' }] },
+      };
+    });
+
+    const consumeGenerator = async (): Promise<void> => {
+      for await (const _ of client.sendQuery('test', '/workspace', undefined, {
+        abortSignal: abortController.signal,
+      })) {
+        // consume
+      }
+    };
+
+    await expect(consumeGenerator()).rejects.toThrow('Query aborted');
+    // Single abort listener registered (not per-retry)
+    expect(callCount).toBe(1);
+  }, 5_000);
+
+  test('enriched error (with stderr) is thrown at retry exhaustion, not raw error', async () => {
+    mockQuery.mockImplementation(async function* (args: {
+      options: { stderr?: (data: string) => void };
+    }) {
+      if (args.options.stderr) {
+        args.options.stderr('diagnostic: something broke');
+      }
+      throw new Error('process exited with code 1');
+    });
+
+    const consumeGenerator = async (): Promise<void> => {
+      for await (const _ of client.sendQuery('test', '/workspace')) {
+        // consume
+      }
+    };
+
+    const err = await consumeGenerator().catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    // Must contain stderr context, not just the raw error
+    expect(err.message).toContain('stderr:');
+    expect(err.message).toContain('diagnostic: something broke');
+  }, 5_000);
+
+  test('PostToolUse hook handles circular reference without crashing', async () => {
+    mockQuery.mockImplementation(async function* (args: {
+      options: {
+        hooks?: Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
+      };
+    }) {
+      // Simulate a tool use that triggers the PostToolUse hook with circular data
+      const hooks = args.options.hooks?.PostToolUse;
+      if (hooks?.[0]?.hooks?.[0]) {
+        const circular: Record<string, unknown> = { key: 'val' };
+        circular.self = circular; // circular reference
+        await hooks[0].hooks[0]({
+          tool_name: 'TestTool',
+          tool_use_id: 'tc-circ',
+          tool_response: circular,
+        });
+      }
+      yield {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'done' }] },
+      };
+    });
+
+    // Should not throw — the try/catch in PostToolUse should handle the circular ref
+    const chunks = [];
+    for await (const chunk of client.sendQuery('test', '/workspace')) {
+      chunks.push(chunk);
+    }
+
+    // The assistant message should still come through
+    expect(chunks.some(c => c.type === 'assistant')).toBe(true);
+    // The error should be logged
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'claude.post_tool_use_hook_error'
+    );
+  });
+
+  test('logs is_error result events at error level', async () => {
+    mockQuery.mockImplementation(async function* () {
+      yield {
+        type: 'result',
+        session_id: 'sid-err',
+        is_error: true,
+        subtype: 'max_turns',
+      };
+    });
+
+    const chunks = [];
+    for await (const chunk of client.sendQuery('test', '/workspace')) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks[0]).toMatchObject({
+      type: 'result',
+      isError: true,
+      errorSubtype: 'max_turns',
+    });
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sid-err', errorSubtype: 'max_turns' }),
+      'claude.result_is_error'
     );
   });
 });

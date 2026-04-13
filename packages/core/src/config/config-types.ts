@@ -10,25 +10,12 @@
  * Global configuration (non-secret user preferences)
  * Located at ~/.archon/config.yaml
  */
-import type { ModelReasoningEffort, WebSearchMode } from '../types';
 
-export interface AssistantDefaults {
-  model?: string;
-  modelReasoningEffort?: ModelReasoningEffort;
-  webSearchMode?: WebSearchMode;
-  additionalDirectories?: string[];
-  /** Path to the Codex CLI binary. Overrides auto-detection in compiled Archon builds.
-   *  Only relevant for the Codex provider; ignored for Claude. */
-  codexBinaryPath?: string;
-}
+// Provider config defaults — canonical definitions live in @archon/providers/types.
+// Imported and re-exported here so existing consumers don't break.
+import type { ClaudeProviderDefaults, CodexProviderDefaults } from '@archon/providers/types';
 
-export interface ClaudeAssistantDefaults {
-  model?: string;
-  /** Claude Code settingSources — controls which CLAUDE.md files are loaded.
-   *  @default ['project']
-   *  @see https://github.com/anthropics/claude-agent-sdk */
-  settingSources?: ('project' | 'user')[];
-}
+export type { ClaudeProviderDefaults, CodexProviderDefaults };
 
 export interface GlobalConfig {
   /**
@@ -47,8 +34,8 @@ export interface GlobalConfig {
    * Assistant-specific defaults (model, reasoning effort, etc.)
    */
   assistants?: {
-    claude?: ClaudeAssistantDefaults;
-    codex?: AssistantDefaults;
+    claude?: ClaudeProviderDefaults;
+    codex?: CodexProviderDefaults;
   };
 
   /**
@@ -118,8 +105,8 @@ export interface RepoConfig {
    * Assistant-specific defaults for this repository
    */
   assistants?: {
-    claude?: ClaudeAssistantDefaults;
-    codex?: AssistantDefaults;
+    claude?: ClaudeProviderDefaults;
+    codex?: CodexProviderDefaults;
   };
 
   /**
@@ -217,8 +204,8 @@ export interface MergedConfig {
   botName: string;
   assistant: 'claude' | 'codex';
   assistants: {
-    claude: ClaudeAssistantDefaults;
-    codex: AssistantDefaults;
+    claude: ClaudeProviderDefaults;
+    codex: CodexProviderDefaults;
   };
   streaming: {
     telegram: 'stream' | 'batch';
@@ -281,8 +268,8 @@ export interface SafeConfig {
   botName: string;
   assistant: 'claude' | 'codex';
   assistants: {
-    claude: Pick<ClaudeAssistantDefaults, 'model'>;
-    codex: Pick<AssistantDefaults, 'model' | 'modelReasoningEffort' | 'webSearchMode'>;
+    claude: Pick<ClaudeProviderDefaults, 'model'>;
+    codex: Pick<CodexProviderDefaults, 'model' | 'modelReasoningEffort' | 'webSearchMode'>;
   };
   streaming: {
     telegram: 'stream' | 'batch';
