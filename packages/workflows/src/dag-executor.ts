@@ -5,9 +5,8 @@
  * Independent nodes within the same layer run concurrently via Promise.allSettled.
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
-import { resolve } from 'path';
 import { execFileAsync } from '@archon/git';
-import { discoverScripts } from './script-discovery';
+import { discoverScriptsForCwd } from './script-discovery';
 import type {
   IWorkflowPlatform,
   WorkflowMessageMetadata,
@@ -20,6 +19,7 @@ import type {
   ProviderCapabilities,
   TokenUsage,
 } from '@archon/providers/types';
+import { getProviderCapabilities } from '@archon/providers';
 import type {
   DagNode,
   ApprovalNode,
@@ -47,7 +47,7 @@ import { formatToolCall } from './utils/tool-formatter';
 import { createLogger } from '@archon/paths';
 import { getWorkflowEventEmitter } from './event-emitter';
 import { evaluateCondition } from './condition-evaluator';
-import { isClaudeModel, isModelCompatible } from './model-validation';
+import { inferProviderFromModel, isModelCompatible } from './model-validation';
 import {
   logNodeStart,
   logNodeComplete,
@@ -243,35 +243,27 @@ export function substituteNodeOutputRefs(
  */
 async function resolveNodeProviderAndModel(
   node: DagNode,
-  workflowProvider: 'claude' | 'codex',
+  workflowProvider: string,
   workflowModel: string | undefined,
   config: WorkflowConfig,
   platform: IWorkflowPlatform,
   conversationId: string,
   workflowRunId: string,
   _cwd: string,
-  workflowLevelOptions: WorkflowLevelOptions,
-  deps: WorkflowDeps
+  workflowLevelOptions: WorkflowLevelOptions
 ): Promise<{
-  provider: 'claude' | 'codex';
+  provider: string;
   model: string | undefined;
   options: SendQueryOptions | undefined;
 }> {
-  let provider: 'claude' | 'codex';
+  const provider: string = node.provider ?? inferProviderFromModel(node.model, workflowProvider);
 
-  if (node.provider) {
-    provider = node.provider;
-  } else if (node.model && isClaudeModel(node.model)) {
-    provider = 'claude';
-  } else if (node.model) {
-    provider = 'codex';
-  } else {
-    provider = workflowProvider;
-  }
-
-  const model =
+  const providerAssistantConfig = config.assistants[provider];
+  const model: string | undefined =
     node.model ??
-    (provider === workflowProvider ? workflowModel : config.assistants[provider]?.model);
+    (provider === workflowProvider
+      ? workflowModel
+      : (providerAssistantConfig?.model as string | undefined));
 
   if (!isModelCompatible(provider, model)) {
     throw new Error(
@@ -279,9 +271,8 @@ async function resolveNodeProviderAndModel(
     );
   }
 
-  // Get provider capabilities for capability warnings
-  const aiClient = deps.getAgentProvider(provider);
-  const caps = aiClient.getCapabilities();
+  // Get provider capabilities for capability warnings (static lookup, no instantiation)
+  const caps = getProviderCapabilities(provider);
 
   // Capability warnings — inform users when features are unsupported
   const capChecks: [string, keyof ProviderCapabilities, boolean][] = [
@@ -293,6 +284,7 @@ async function resolveNodeProviderAndModel(
     ['hooks', 'hooks', node.hooks !== undefined],
     ['mcp', 'mcp', node.mcp !== undefined],
     ['skills', 'skills', node.skills !== undefined && node.skills.length > 0],
+    ['agents', 'agents', node.agents !== undefined],
     ['effort', 'effortControl', (node.effort ?? workflowLevelOptions.effort) !== undefined],
     ['thinking', 'thinkingControl', (node.thinking ?? workflowLevelOptions.thinking) !== undefined],
     ['maxBudgetUsd', 'costControl', node.maxBudgetUsd !== undefined],
@@ -302,6 +294,7 @@ async function resolveNodeProviderAndModel(
       (node.fallbackModel ?? workflowLevelOptions.fallbackModel) !== undefined,
     ],
     ['sandbox', 'sandbox', (node.sandbox ?? workflowLevelOptions.sandbox) !== undefined],
+    ['env', 'envInjection', (config.envVars && Object.keys(config.envVars).length > 0) === true],
   ];
 
   const unsupported: string[] = [];
@@ -324,6 +317,23 @@ async function resolveNodeProviderAndModel(
     }
   }
 
+  // Surface agents + skills ID collision — user-defined 'dag-node-skills'
+  // silently overrides Archon's skills wrapper. User wins (by design) but
+  // the operator should know they've neutered the wrapper.
+  if (
+    node.agents?.['dag-node-skills'] !== undefined &&
+    node.skills !== undefined &&
+    node.skills.length > 0
+  ) {
+    getLog().warn({ nodeId: node.id }, 'dag.agents_skills_id_collision');
+    await safeSendMessage(
+      platform,
+      conversationId,
+      `Warning: Node '${node.id}' defines an agent with reserved ID 'dag-node-skills' AND uses 'skills:'. Your inline agent overrides Archon's automatic skills wrapper — the 'skills:' field will NOT take effect. Rename the agent or remove 'skills:' to fix.`,
+      { workflowId: workflowRunId, nodeName: node.id }
+    );
+  }
+
   // Build universal base options
   const baseOptions: SendQueryOptions = {};
   if (model) baseOptions.model = model;
@@ -343,6 +353,7 @@ async function resolveNodeProviderAndModel(
     mcp: node.mcp,
     hooks: node.hooks,
     skills: node.skills,
+    agents: node.agents,
     allowed_tools: node.allowed_tools,
     denied_tools: node.denied_tools,
     effort: node.effort ?? workflowLevelOptions.effort,
@@ -361,7 +372,7 @@ async function resolveNodeProviderAndModel(
   const options: SendQueryOptions = {
     ...baseOptions,
     nodeConfig,
-    assistantConfig: assistantConfig as Record<string, unknown>,
+    assistantConfig,
   };
 
   return { provider, model, options };
@@ -463,7 +474,7 @@ async function executeNodeInternal(
   cwd: string,
   workflowRun: WorkflowRun,
   node: CommandNode | PromptNode,
-  provider: 'claude' | 'codex',
+  provider: string,
   nodeOptions: SendQueryOptions | undefined,
   artifactsDir: string,
   logDir: string,
@@ -644,7 +655,19 @@ async function executeNodeInternal(
 
       if (msg.type === 'assistant' && msg.content) {
         nodeOutputText += msg.content; // ALWAYS capture for $node_id.output
-        if (streamingMode === 'stream') {
+        if (streamingMode === 'stream' || msg.flush) {
+          // `flush` chunks (e.g. Pi notify() emitting a plannotator review URL)
+          // must reach the user before the node blocks. Drain any queued batch
+          // content first so order is preserved.
+          if (streamingMode === 'batch' && batchMessages.length > 0) {
+            await safeSendMessage(
+              platform,
+              conversationId,
+              batchMessages.join('\n\n'),
+              nodeContext
+            );
+            batchMessages.length = 0;
+          }
           await safeSendMessage(platform, conversationId, msg.content, nodeContext);
         } else {
           batchMessages.push(msg.content);
@@ -770,6 +793,25 @@ async function executeNodeInternal(
           throw new Error(
             `Node '${node.id}' exceeded cost cap${cap !== undefined ? ` of $${cap.toFixed(2)}` : ''}.`
           );
+        }
+        // Fail loudly on any other SDK error result. Previously we broke out of
+        // the stream silently, producing empty/partial output without signaling
+        // failure — which let failed iterations masquerade as successes (#1208).
+        if (msg.isError) {
+          const subtype = msg.errorSubtype ?? 'unknown';
+          const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
+          getLog().error(
+            {
+              nodeId: node.id,
+              errorSubtype: subtype,
+              errors: msg.errors,
+              sessionId: msg.sessionId,
+              stopReason: msg.stopReason,
+              durationMs: Date.now() - nodeStartTime,
+            },
+            'dag.node_sdk_error_result'
+          );
+          throw new Error(`Node '${node.id}' failed: SDK returned ${subtype}${errorsDetail}`);
         }
         break; // Result is the "I'm done" signal — don't wait for subprocess to exit
       } else if (msg.type === 'system' && msg.content) {
@@ -1051,7 +1093,8 @@ async function executeBashNode(
   baseBranch: string,
   docsDir: string,
   nodeOutputs: Map<string, NodeOutput>,
-  issueContext?: string
+  issueContext?: string,
+  envVars?: Record<string, string>
 ): Promise<NodeOutput> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1094,11 +1137,14 @@ async function executeBashNode(
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, true);
 
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
+  const subprocessEnv =
+    envVars && Object.keys(envVars).length > 0 ? { ...process.env, ...envVars } : undefined;
 
   try {
     const { stdout, stderr } = await execFileAsync('bash', ['-c', finalScript], {
       cwd,
       timeout,
+      env: subprocessEnv,
     });
 
     // Trim trailing newline from stdout (common shell behavior)
@@ -1201,7 +1247,8 @@ async function executeScriptNode(
   baseBranch: string,
   docsDir: string,
   nodeOutputs: Map<string, NodeOutput>,
-  issueContext?: string
+  issueContext?: string,
+  envVars?: Record<string, string>
 ): Promise<NodeOutput> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1244,6 +1291,8 @@ async function executeScriptNode(
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, false);
 
   const timeout = node.timeout ?? SUBPROCESS_DEFAULT_TIMEOUT;
+  const subprocessEnv =
+    envVars && Object.keys(envVars).length > 0 ? { ...process.env, ...envVars } : undefined;
 
   // Build the command and args based on runtime and inline vs named
   let cmd = '';
@@ -1256,7 +1305,10 @@ async function executeScriptNode(
       // Inline code execution
       if (node.runtime === 'bun') {
         cmd = 'bun';
-        args = ['-e', finalScript];
+        // --no-env-file prevents Bun from auto-loading .env from the execution
+        // cwd (the target repo). Without this, repo .env leaks into the script
+        // subprocess despite Archon's parent process cleanup.
+        args = ['--no-env-file', '-e', finalScript];
       } else {
         // uv run --with dep1 --with dep2 python -c <code>
         cmd = 'uv';
@@ -1264,13 +1316,48 @@ async function executeScriptNode(
         args = ['run', ...withFlags, 'python', '-c', finalScript];
       }
     } else {
-      // Named script — look up in .archon/scripts/ directory
-      const scriptsDir = resolve(cwd, '.archon', 'scripts');
-      const scripts = await discoverScripts(scriptsDir);
+      // Named script — look up across repo and home scopes.
+      // Precedence: <cwd>/.archon/scripts/ > ~/.archon/scripts/ (repo wins).
+      // Wrap discovery in its own try/catch so a permission error on ~/.archon/scripts/
+      // isn't mis-attributed by the outer catch's "permission denied (check cwd
+      // permissions)" branch — that branch is for execFileAsync EACCES.
+      let scripts: Awaited<ReturnType<typeof discoverScriptsForCwd>>;
+      try {
+        scripts = await discoverScriptsForCwd(cwd);
+      } catch (discoveryErr) {
+        const err = discoveryErr as Error;
+        const errorMsg = `Script node '${node.id}': failed to discover scripts — ${err.message}`;
+        getLog().error({ err, nodeId: node.id, cwd }, 'script_discovery_failed');
+        await safeSendMessage(platform, conversationId, errorMsg, nodeContext);
+        await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
+
+        emitter.emit({
+          type: 'node_failed',
+          runId: workflowRun.id,
+          nodeId: node.id,
+          nodeName: node.id,
+          error: errorMsg,
+        });
+        deps.store
+          .createWorkflowEvent({
+            workflow_run_id: workflowRun.id,
+            event_type: 'node_failed',
+            step_name: node.id,
+            data: { error: errorMsg, type: 'script' },
+          })
+          .catch((dbErr: Error) => {
+            getLog().error(
+              { err: dbErr, workflowRunId: workflowRun.id, eventType: 'node_failed' },
+              'workflow_event_persist_failed'
+            );
+          });
+
+        return { state: 'failed', output: '', error: errorMsg };
+      }
       const scriptDef = scripts.get(finalScript);
 
       if (!scriptDef) {
-        const errorMsg = `Script node '${node.id}': named script '${finalScript}' not found in .archon/scripts/`;
+        const errorMsg = `Script node '${node.id}': named script '${finalScript}' not found in .archon/scripts/ or ~/.archon/scripts/`;
         getLog().error({ nodeId: node.id, scriptName: finalScript }, 'script_not_found');
         await safeSendMessage(platform, conversationId, errorMsg, nodeContext);
         await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
@@ -1306,13 +1393,14 @@ async function executeScriptNode(
         args = ['run', ...withFlags, scriptDef.path];
       } else {
         cmd = 'bun';
-        args = ['run', scriptDef.path];
+        args = ['--no-env-file', 'run', scriptDef.path];
       }
     }
 
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd,
       timeout,
+      env: subprocessEnv,
     });
 
     // Trim trailing newline from stdout (common shell behavior)
@@ -1404,7 +1492,7 @@ async function executeScriptNode(
  * Uses the same nodeConfig + assistantConfig pattern as resolveNodeProviderAndModel.
  */
 function buildLoopNodeOptions(
-  provider: 'claude' | 'codex',
+  provider: string,
   model: string | undefined,
   config: WorkflowConfig,
   workflowLevelOptions?: WorkflowLevelOptions
@@ -1414,7 +1502,7 @@ function buildLoopNodeOptions(
   if (config.envVars && Object.keys(config.envVars).length > 0) {
     options.env = config.envVars;
   }
-  options.assistantConfig = (config.assistants[provider] ?? {}) as Record<string, unknown>;
+  options.assistantConfig = config.assistants[provider] ?? {};
   // Pass workflow-level options as nodeConfig so providers can apply them
   if (workflowLevelOptions) {
     options.nodeConfig = {
@@ -1443,7 +1531,7 @@ async function executeLoopNode(
   cwd: string,
   workflowRun: WorkflowRun,
   node: LoopNode,
-  workflowProvider: 'claude' | 'codex',
+  workflowProvider: string,
   workflowModel: string | undefined,
   artifactsDir: string,
   logDir: string,
@@ -1621,6 +1709,28 @@ async function executeLoopNode(
           if (msg.stopReason !== undefined) loopFinalStopReason = msg.stopReason;
           if (msg.numTurns !== undefined) {
             loopTotalNumTurns = (loopTotalNumTurns ?? 0) + msg.numTurns;
+          }
+          // Fail the iteration loudly on SDK error results. Previously we broke
+          // silently, producing empty output and continuing to the next iteration —
+          // which made `error_during_execution` on resumed interactive loops look
+          // like a "5-second crash" that kept burning iterations (#1208).
+          if (msg.isError) {
+            const subtype = msg.errorSubtype ?? 'unknown';
+            const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
+            getLog().error(
+              {
+                nodeId: node.id,
+                iteration: i,
+                errorSubtype: subtype,
+                errors: msg.errors,
+                sessionId: msg.sessionId,
+                stopReason: msg.stopReason,
+              },
+              'loop_node.iteration_sdk_error'
+            );
+            throw new Error(
+              `Loop '${node.id}' iteration ${String(i)} failed: SDK returned ${subtype}${errorsDetail}`
+            );
           }
           break; // Result is the "I'm done" signal — don't wait for subprocess to exit
         } else if (msg.type === 'tool' && msg.toolName) {
@@ -1939,7 +2049,7 @@ async function executeApprovalNode(
   deps: WorkflowDeps,
   platform: IWorkflowPlatform,
   conversationId: string,
-  workflowProvider: 'claude' | 'codex',
+  workflowProvider: string,
   workflowModel: string | undefined,
   cwd: string,
   artifactsDir: string,
@@ -2028,8 +2138,7 @@ async function executeApprovalNode(
       conversationId,
       workflowRun.id,
       cwd,
-      workflowLevelOptions,
-      deps
+      workflowLevelOptions
     );
 
     const output = await executeNodeInternal(
@@ -2110,7 +2219,7 @@ export async function executeDagWorkflow(
   cwd: string,
   workflow: { name: string; nodes: readonly DagNode[] } & WorkflowLevelOptions,
   workflowRun: WorkflowRun,
-  workflowProvider: 'claude' | 'codex',
+  workflowProvider: string,
   workflowModel: string | undefined,
   artifactsDir: string,
   logDir: string,
@@ -2339,7 +2448,8 @@ export async function executeDagWorkflow(
               baseBranch,
               docsDir,
               nodeOutputs,
-              issueContext
+              issueContext,
+              config.envVars
             );
             return { nodeId: node.id, output };
           }
@@ -2347,21 +2457,14 @@ export async function executeDagWorkflow(
           // 3b. Loop node dispatch — manages its own AI sessions and iteration
           if (isLoopNode(node)) {
             // Resolve per-node provider/model overrides (same logic as other node types)
-            let loopProvider: 'claude' | 'codex';
-            if (node.provider) {
-              loopProvider = node.provider;
-            } else if (node.model && isClaudeModel(node.model)) {
-              loopProvider = 'claude';
-            } else if (node.model) {
-              loopProvider = 'codex';
-            } else {
-              loopProvider = workflowProvider;
-            }
-            const loopModel =
+            const loopProvider: string =
+              node.provider ?? inferProviderFromModel(node.model, workflowProvider);
+            const loopAssistantConfig = config.assistants[loopProvider];
+            const loopModel: string | undefined =
               node.model ??
               (loopProvider === workflowProvider
                 ? workflowModel
-                : config.assistants[loopProvider]?.model);
+                : (loopAssistantConfig?.model as string | undefined));
 
             if (!isModelCompatible(loopProvider, loopModel)) {
               return {
@@ -2465,7 +2568,8 @@ export async function executeDagWorkflow(
               baseBranch,
               docsDir,
               nodeOutputs,
-              issueContext
+              issueContext,
+              config.envVars
             );
             return { nodeId: node.id, output };
           }
@@ -2480,8 +2584,7 @@ export async function executeDagWorkflow(
             conversationId,
             workflowRun.id,
             cwd,
-            workflowLevelOptions,
-            deps
+            workflowLevelOptions
           );
 
           // 5. Determine session — parallel or context:fresh → always fresh
@@ -2714,16 +2817,34 @@ export async function executeDagWorkflow(
   }
 
   if (anyFailed) {
+    if (await skipIfStatusChanged('dag.skip_fail_status_changed')) return;
     const failedNodes = [...nodeOutputs.entries()]
       .filter(([, o]) => o.state === 'failed')
       .map(([id, o]) => `'${id}': ${o.state === 'failed' ? o.error : 'unknown'}`)
       .join('; ');
-    await safeSendMessage(
-      platform,
-      conversationId,
-      `\u26a0\ufe0f Some DAG nodes failed: ${failedNodes}\nSuccessful nodes completed normally.`,
-      { workflowId: workflowRun.id }
-    );
+    const failMsg = `DAG workflow '${workflow.name}' completed with failures: ${failedNodes}`;
+    await deps.store.failWorkflowRun(workflowRun.id, failMsg).catch((dbErr: Error) => {
+      getLog().error({ err: dbErr, workflowRunId: workflowRun.id }, 'dag_db_fail_failed');
+    });
+    await logWorkflowError(logDir, workflowRun.id, failMsg).catch((logErr: Error) => {
+      getLog().error(
+        { err: logErr, workflowRunId: workflowRun.id },
+        'dag.workflow_error_log_write_failed'
+      );
+    });
+    const emitterForFail = getWorkflowEventEmitter();
+    emitterForFail.emit({
+      type: 'workflow_failed',
+      runId: workflowRun.id,
+      workflowName: workflow.name,
+      error: failMsg,
+    });
+    emitterForFail.unregisterRun(workflowRun.id);
+    await safeSendMessage(platform, conversationId, `\u274c ${failMsg}`, {
+      workflowId: workflowRun.id,
+    });
+    // DO NOT throw — outer executor.ts catch would duplicate workflow_failed events
+    return;
   }
 
   // Check if status was changed externally (e.g. cancelled) before marking complete.

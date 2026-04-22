@@ -16,6 +16,7 @@ import type {
   ProviderCapabilities,
 } from '../types';
 import { parseCodexConfig } from './config';
+import { CODEX_CAPABILITIES } from './capabilities';
 import { resolveCodexBinaryPath } from './binary-resolver';
 import { createLogger } from '@archon/paths';
 
@@ -76,6 +77,14 @@ function buildThreadOptions(
     webSearchMode: config.webSearchMode,
     additionalDirectories: config.additionalDirectories,
   };
+}
+
+function buildCodexEnv(requestEnv: Record<string, string>): Record<string, string> {
+  const baseEnv = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+  );
+  // Managed project env intentionally overrides inherited process env for project-scoped execution.
+  return { ...baseEnv, ...requestEnv };
 }
 
 const CODEX_MODEL_FALLBACKS: Record<string, string> = {
@@ -465,25 +474,32 @@ export class CodexProvider implements IAgentProvider {
     this.retryBaseDelayMs = options?.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
   }
 
-  getCapabilities(): ProviderCapabilities {
-    return {
-      sessionResume: true,
-      mcp: false,
-      hooks: false,
-      skills: false,
-      toolRestrictions: false,
-      structuredOutput: true,
-      envInjection: false,
-      costControl: false,
-      effortControl: false,
-      thinkingControl: false,
-      fallbackModel: false,
-      sandbox: false,
-    };
+  private async createCodexClient(
+    configCodexBinaryPath: string | undefined,
+    requestEnv?: Record<string, string>
+  ): Promise<Codex> {
+    if (!requestEnv || Object.keys(requestEnv).length === 0) {
+      return getCodex(configCodexBinaryPath);
+    }
+
+    try {
+      return new Codex({
+        codexPathOverride: await resolveCodexBinaryPath(configCodexBinaryPath),
+        env: buildCodexEnv(requestEnv),
+      });
+    } catch (error) {
+      const err = error as Error;
+      if (isModelAccessError(err.message)) {
+        throw new Error(buildModelAccessMessage());
+      }
+      throw new Error(`Codex query failed: ${err.message}`);
+    }
   }
 
-  // TODO(#1135): Pre-spawn env-leak gate was removed during provider extraction.
-  // Caller-side enforcement (orchestrator, dag-executor) is tracked in #1135.
+  getCapabilities(): ProviderCapabilities {
+    return CODEX_CAPABILITIES;
+  }
+
   async *sendQuery(
     prompt: string,
     cwd: string,
@@ -494,7 +510,7 @@ export class CodexProvider implements IAgentProvider {
     const codexConfig = parseCodexConfig(assistantConfig);
 
     // 1. Initialize SDK and build thread options
-    const codex = await getCodex(codexConfig.codexBinaryPath);
+    const codex = await this.createCodexClient(codexConfig.codexBinaryPath, requestOptions?.env);
     const threadOptions = buildThreadOptions(cwd, requestOptions?.model, assistantConfig);
 
     if (requestOptions?.abortSignal?.aborted) {

@@ -216,7 +216,6 @@ const mockCodebase: Codebase = {
   repository_url: 'https://github.com/user/repo',
   default_cwd: '/workspace/test-project',
   ai_assistant_type: 'claude',
-  allow_env_keys: false,
   commands: {},
   created_at: new Date(),
   updated_at: new Date(),
@@ -1154,10 +1153,11 @@ describe('orchestrator-agent handleMessage', () => {
 
       await handleMessage(platform, 'chat-456', 'help');
 
+      // Discovery is called positionally with (cwd, loadConfig) — no options arg.
+      // Home-scoped workflows (~/.archon/workflows/) are discovered internally.
       expect(mockDiscoverWorkflows).toHaveBeenCalledWith(
         '/home/test/.archon/workspaces',
-        expect.any(Function),
-        { globalSearchPath: '/home/test/.archon' }
+        expect.any(Function)
       );
     });
 

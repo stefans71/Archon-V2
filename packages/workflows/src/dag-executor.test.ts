@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach, mock, type Mock } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, mock, spyOn, type Mock } from 'bun:test';
 import { mkdir, writeFile, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import * as git from '@archon/git';
 
 // --- Mock logger (MUST come before imports of modules under test) ---
 
@@ -24,6 +25,11 @@ mock.module('@archon/paths', () => ({
   },
   getDefaultCommandsPath: () => '/nonexistent/defaults',
 }));
+
+// --- Bootstrap provider registry (after path mocks, before dag-executor import) ---
+import { registerBuiltinProviders, clearRegistry } from '@archon/providers';
+clearRegistry();
+registerBuiltinProviders();
 
 // --- Imports (after mocks) ---
 import {
@@ -99,6 +105,7 @@ const mockClaudeCapabilities = () => ({
   mcp: true,
   hooks: true,
   skills: true,
+  agents: true,
   toolRestrictions: true,
   structuredOutput: true,
   envInjection: true,
@@ -114,9 +121,10 @@ const mockCodexCapabilities = () => ({
   mcp: false,
   hooks: false,
   skills: false,
+  agents: false,
   toolRestrictions: false,
   structuredOutput: true,
-  envInjection: false,
+  envInjection: true,
   costControl: false,
   effortControl: false,
   thinkingControl: false,
@@ -1201,6 +1209,38 @@ describe('executeDagWorkflow -- bash nodes', () => {
 
     // AI client called only for the AI node, not the bash node
     expect(mockSendQueryDag.mock.calls.length).toBe(1);
+  });
+
+  it('passes config.envVars to bash subprocesses', async () => {
+    const execSpy = spyOn(git, 'execFileAsync').mockResolvedValue({ stdout: 'ok\n', stderr: '' });
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('bash-env-run-id');
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-bash-env',
+      testDir,
+      { name: 'bash-env-test', nodes: [{ id: 'stats', bash: 'echo ok' }] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, envVars: { MY_SECRET: 'abc123' } }
+    );
+
+    expect(execSpy).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'echo ok'],
+      expect.objectContaining({
+        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+      })
+    );
+    execSpy.mockRestore();
   });
 
   it('bash node output with shell metacharacters does not inject into downstream bash script', async () => {
@@ -2389,6 +2429,90 @@ describe('executeDagWorkflow -- skills options', () => {
     const warning = messages.find(m => m.includes('skills') && m.includes('codex'));
     expect(warning).toBeDefined();
   });
+
+  it('passes agents to sendQuery nodeConfig when node has inline agents', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    const agentsMap = {
+      'brief-gen': {
+        description: 'Summarises an issue',
+        prompt: 'You are concise.',
+        model: 'haiku',
+        tools: ['Bash', 'Read'],
+      },
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'dag-agents',
+        nodes: [{ id: 'review', command: 'my-cmd', agents: agentsMap }],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const nodeConfig = optionsArg?.nodeConfig as Record<string, unknown>;
+    expect(nodeConfig?.agents).toEqual(agentsMap);
+  });
+
+  it('warns user when Codex DAG node has inline agents', async () => {
+    mockGetAgentProviderDag.mockReturnValue({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'codex',
+      getCapabilities: mockCodexCapabilities,
+    });
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'dag-codex-agents',
+        nodes: [
+          {
+            id: 'review',
+            command: 'my-cmd',
+            provider: 'codex',
+            agents: {
+              'brief-gen': { description: 'd', prompt: 'p' },
+            },
+          },
+        ],
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    const sendMessage = platform.sendMessage as ReturnType<typeof mock>;
+    const messages = sendMessage.mock.calls.map((call: unknown[]) => call[1] as string);
+    const warning = messages.find(m => m.includes('agents') && m.includes('codex'));
+    expect(warning).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2476,6 +2600,172 @@ nodes:
     const wf = result.workflow!;
     expect(wf.nodes).toBeDefined();
     expect(wf.nodes[0].skills).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inline agents — field validation via parseWorkflow
+// ---------------------------------------------------------------------------
+
+describe('agents field validation via parseWorkflow', () => {
+  it('parses a valid agents map on a DAG node', () => {
+    const yaml = `
+name: test-agents
+description: test
+nodes:
+  - id: triage
+    prompt: "Spawn a brief-gen sub-agent"
+    agents:
+      brief-gen:
+        description: Summarises an issue
+        prompt: "You are concise. Return JSON { summary }."
+        model: haiku
+        tools: [Bash, Read]
+`;
+    const result = parseWorkflow(yaml, 'agents.yaml');
+    expect(result.error).toBeNull();
+    expect(result.workflow).not.toBeNull();
+    const wf = result.workflow!;
+    const node = wf.nodes[0];
+    expect(node.agents).toBeDefined();
+    expect(node.agents!['brief-gen'].description).toBe('Summarises an issue');
+    expect(node.agents!['brief-gen'].model).toBe('haiku');
+    expect(node.agents!['brief-gen'].tools).toEqual(['Bash', 'Read']);
+  });
+
+  it('rejects an agent missing description', () => {
+    const yaml = `
+name: missing-desc
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      brief-gen:
+        prompt: "You are concise."
+`;
+    const result = parseWorkflow(yaml, 'missing-desc.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects an agent missing prompt', () => {
+    const yaml = `
+name: missing-prompt
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      brief-gen:
+        description: "A brief generator"
+`;
+    const result = parseWorkflow(yaml, 'missing-prompt.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects empty agents map', () => {
+    const yaml = `
+name: empty-agents
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents: {}
+`;
+    const result = parseWorkflow(yaml, 'empty-agents.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects agent ID that is not kebab-case', () => {
+    const yaml = `
+name: bad-id
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      BriefGen:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'bad-id.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('kebab-case');
+  });
+
+  it('ignores agents on bash nodes (field stripped, no error)', () => {
+    const yaml = `
+name: bash-agents
+description: test
+nodes:
+  - id: lint
+    bash: "echo lint"
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'bash-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('ignores agents on script nodes (field stripped, no error)', () => {
+    const yaml = `
+name: script-agents
+description: test
+nodes:
+  - id: run
+    script: 'console.log("hi")'
+    runtime: bun
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'script-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('ignores agents on loop nodes (field stripped, no error)', () => {
+    const yaml = `
+name: loop-agents
+description: test
+nodes:
+  - id: iterate
+    loop:
+      prompt: "Do the work"
+      until: "DONE"
+      max_iterations: 2
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'loop-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('node with no agents field is undefined', () => {
+    const yaml = `
+name: no-agents
+description: test
+nodes:
+  - id: basic
+    prompt: "Do something"
+`;
+    const result = parseWorkflow(yaml, 'no-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
   });
 });
 
@@ -3556,6 +3846,70 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       expect(sessionArg).toBe('loop-session-1');
     });
 
+    it('loop iteration fails loudly when SDK returns error_during_execution', async () => {
+      // Regression test for #1208: previously the loop silently broke on isError
+      // results and kept iterating with empty output, producing "5-second crashes"
+      // that masqueraded as successful iterations.
+      mockSendQueryDag.mockImplementation(function* () {
+        yield {
+          type: 'result',
+          isError: true,
+          errorSubtype: 'error_during_execution',
+          errors: ['Subprocess crashed mid-turn'],
+          sessionId: 'bad-session',
+        };
+      });
+
+      const store = createMockStore();
+      const mockDeps = createMockDeps(store);
+      const platform = createMockPlatform();
+      const workflowRun = makeWorkflowRun();
+
+      await executeDagWorkflow(
+        mockDeps,
+        platform,
+        'conv-dag',
+        testDir,
+        {
+          name: 'loop-iteration-err',
+          nodes: [
+            {
+              id: 'work',
+              loop: {
+                prompt: 'Do the work. Say DONE.',
+                until: 'DONE',
+                max_iterations: 5,
+              },
+            },
+          ],
+        },
+        workflowRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      // Should fail after one iteration rather than burning through max_iterations
+      expect(mockSendQueryDag.mock.calls.length).toBe(1);
+      // The loop_iteration_failed event should carry the subtype and SDK errors detail
+      const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+      const iterFailedEvents = eventCalls.filter(
+        (call: unknown[]) =>
+          (call[0] as Record<string, unknown>).event_type === 'loop_iteration_failed'
+      );
+      expect(iterFailedEvents.length).toBeGreaterThan(0);
+      const failedData = (iterFailedEvents[0][0] as Record<string, unknown>).data as Record<
+        string,
+        unknown
+      >;
+      expect(failedData.error).toContain('error_during_execution');
+      expect(failedData.error).toContain('Subprocess crashed mid-turn');
+    });
+
     it('non-interactive loop is unaffected (no pause)', async () => {
       mockSendQueryDag.mockImplementation(function* () {
         yield { type: 'assistant', content: 'Still working...' };
@@ -4579,6 +4933,58 @@ describe('executeDagWorkflow -- Claude SDK advanced options', () => {
     expect(capMessage).toBeDefined();
   });
 
+  it('fails node when SDK returns error_during_execution result', async () => {
+    // Regression test for #1208: previously we only failed on error_max_budget_usd
+    // and silently broke on all other isError subtypes, letting failed nodes
+    // masquerade as successes with empty output.
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'result',
+        isError: true,
+        errorSubtype: 'error_during_execution',
+        errors: ['Tool call failed: permission denied'],
+        sessionId: 'sid-err',
+      };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'err-exec-test',
+        nodes: [{ id: 'step1', command: 'my-cmd' }],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // The node_failed event should carry the subtype and SDK errors detail
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeFailedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_failed'
+    );
+    expect(nodeFailedEvents.length).toBeGreaterThan(0);
+    const failedData = (nodeFailedEvents[0][0] as Record<string, unknown>).data as Record<
+      string,
+      unknown
+    >;
+    expect(failedData.error).toContain('error_during_execution');
+    expect(failedData.error).toContain('permission denied');
+  });
+
   it('forwards workflow-level effort to node when no per-node override', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
@@ -5261,5 +5667,89 @@ describe('executeDagWorkflow -- script nodes', () => {
     const messages = sendMessage.mock.calls.map((call: unknown[]) => call[1] as string);
     const notFoundMsg = messages.find((m: string) => m.includes('not found in .archon/scripts/'));
     expect(notFoundMsg).toBeDefined();
+  });
+
+  it('bun script node does not leak repo .env from execution cwd (#1135)', async () => {
+    // Regression test: place a .env with a marker in the execution cwd.
+    // The bun script must NOT see it because --no-env-file is passed.
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('env-leak-run-id', {
+      workflow_name: 'env-leak-test',
+      conversation_id: 'conv-env-leak',
+      user_message: 'env leak test',
+    });
+
+    // Write a .env with a marker in the script execution cwd
+    await writeFile(join(testDir, '.env'), 'LEAKED_REPO_SECRET=should_not_appear\n');
+
+    const scriptNode: ScriptNode = {
+      id: 'env-check',
+      script: 'console.log(process.env.LEAKED_REPO_SECRET ?? "CLEAN")',
+      runtime: 'bun',
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-env-leak',
+      testDir,
+      { name: 'env-leak-test', nodes: [scriptNode] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // The node output should be "CLEAN" — the repo .env was not loaded
+    const eventCalls = (mockDeps.store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const completedEvent = eventCalls.find(
+      (call: unknown[]) =>
+        (call[0] as { event_type: string }).event_type === 'node_completed' &&
+        (call[0] as { step_name: string }).step_name === 'env-check'
+    );
+    expect(completedEvent).toBeDefined();
+    expect((completedEvent![0] as { data: { node_output: string } }).data.node_output).toBe(
+      'CLEAN'
+    );
+  });
+
+  it('passes config.envVars to script subprocesses', async () => {
+    const execSpy = spyOn(git, 'execFileAsync').mockResolvedValue({ stdout: 'ok\n', stderr: '' });
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('script-env-run-id');
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-script-env',
+      testDir,
+      {
+        name: 'script-env-test',
+        nodes: [{ id: 'inline-bun', script: 'console.log("ok")', runtime: 'bun' }],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, envVars: { MY_SECRET: 'abc123' } }
+    );
+
+    expect(execSpy).toHaveBeenCalledWith(
+      'bun',
+      ['--no-env-file', '-e', 'console.log("ok")'],
+      expect.objectContaining({
+        env: expect.objectContaining({ MY_SECRET: 'abc123' }),
+      })
+    );
+    execSpy.mockRestore();
   });
 });
